@@ -23,7 +23,9 @@ HTTP API с SSE-событиями, CLI, шина событий, реестр �
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
-uv pip install --python .venv/Scripts/python.exe -e ".[moss]"   # опционально: движок MOSS
+# Опционально — движок MOSS (torch ставится из индекса PyTorch, сборка CUDA 13.0):
+uv pip install --python .venv/Scripts/python.exe "torch==2.11.0" "torchaudio==2.11.0" --index-url https://download.pytorch.org/whl/cu130
+uv pip install --python .venv/Scripts/python.exe -e ".[moss]"
 cp .env.example .env    # поправьте пути (ffmpeg, каталог моделей)
 
 stenograph transcribe meeting.mp4                  # CLI (движок из настроек)

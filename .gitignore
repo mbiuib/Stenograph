@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .env
+.idea/
 data/
 .pytest_cache/
 .mypy_cache/
