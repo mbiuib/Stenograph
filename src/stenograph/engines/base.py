@@ -56,6 +56,8 @@ class AsrEngine(Protocol):
     progress/segments incrementally through the callbacks.
     """
 
+    name: str  # engine name as registered in the engine registry
+
     def transcribe(
         self,
         audio_path: Path,

@@ -23,7 +23,7 @@ from .storage import JobRepository
 
 log = logging.getLogger(__name__)
 
-EngineFactory = Callable[[Settings], AsrEngine]
+EngineFactory = Callable[[str, Settings], AsrEngine]
 
 
 class TranscriptionService:
@@ -34,15 +34,15 @@ class TranscriptionService:
         settings: Settings,
         repo: JobRepository,
         bus: EventBus,
-        engine_name: str = "whisper",
+        engine_name: str | None = None,
         engine_factory: EngineFactory | None = None,
     ) -> None:
         self.settings = settings
         self.repo = repo
         self.bus = bus
-        self.engine_name = engine_name
+        self.engine_name = engine_name or settings.engine
         self._engine_factory = engine_factory
-        self._engine: AsrEngine | None = None  # created lazily on the worker thread
+        self._engines: dict[str, AsrEngine] = {}  # created lazily on the worker thread
         self._queue: queue.Queue[str] = queue.Queue()
         self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
@@ -52,7 +52,12 @@ class TranscriptionService:
         self._worker.start()
 
     def submit_file(
-        self, source_path: Path, *, source_name: str | None = None, language: str | None = None
+        self,
+        source_path: Path,
+        *,
+        source_name: str | None = None,
+        language: str | None = None,
+        engine: str | None = None,
     ) -> Job:
         """Register a new file job and put it on the queue."""
         job = Job(
@@ -60,7 +65,7 @@ class TranscriptionService:
             source_name=source_name or source_path.name,
             source_path=str(source_path),
         )
-        job.meta["request"] = {"language": language}
+        job.meta["request"] = {"language": language, "engine": engine}
         self.repo.save(job)
         with self._lock:
             self._cancel_events[job.id] = threading.Event()
@@ -112,14 +117,8 @@ class TranscriptionService:
             cancel_event = self._cancel_events.get(job_id) or threading.Event()
             self._cancel_events[job_id] = cancel_event
 
-        if self._engine is None:
-            self._engine = (
-                self._engine_factory(self.settings)
-                if self._engine_factory
-                else get_asr(self.engine_name, self.settings)
-            )
-
         request = job.meta.get("request") or {}
+        engine = self._engine_for(request.get("engine") or self.engine_name)
         language = request.get("language") or self.settings.language_or_none()
         options = TranscribeOptions(language=language)
 
@@ -128,12 +127,24 @@ class TranscriptionService:
             settings=self.settings,
             repo=self.repo,
             bus=self.bus,
-            engine=self._engine,
+            engine=engine,
             options=options,
             is_cancelled=cancel_event.is_set,
         )
         with self._lock:
             self._cancel_events.pop(job_id, None)
+
+    def _engine_for(self, name: str) -> AsrEngine:
+        """Return (and cache) the engine instance for the given name."""
+        engine = self._engines.get(name)
+        if engine is None:
+            engine = (
+                self._engine_factory(name, self.settings)
+                if self._engine_factory
+                else get_asr(name, self.settings)
+            )
+            self._engines[name] = engine
+        return engine
 
 
 def build_default_service(settings: Settings | None = None) -> TranscriptionService:

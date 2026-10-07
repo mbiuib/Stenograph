@@ -11,19 +11,24 @@
 **Milestone 0 — ядро.** Файловая транскрибация (faster-whisper), SQLite-история,
 HTTP API с SSE-событиями, CLI, шина событий, реестр движков.
 
-Дальше по плану: движок MOSS, live-захват (WASAPI loopback + микрофон),
-Jitsi-мост (streaming-whisper для Jigasi), диаризация, LLM-постобработка,
-веб-интерфейс.
+**Milestone 1 — движок MOSS** (end-to-end ASR + диаризация за проход): чанкинг
+длинных файлов по 300 с с перехлёстом, дедупликация границ, метки спикеров;
+переключается настройкой `MEETSCRIBE_ENGINE=moss` или флагом `--engine`.
+
+Дальше по плану: live-захват (WASAPI loopback + микрофон), Jitsi-мост
+(streaming-whisper для Jigasi), веб-интерфейс (React), LLM-постобработка.
 
 ## Быстрый старт
 
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
+uv pip install --python .venv/Scripts/python.exe -e ".[moss]"   # опционально: движок MOSS
 cp .env.example .env    # поправьте пути (ffmpeg, каталог моделей)
 
-stenograph transcribe meeting.mp4          # CLI
-uvicorn stenograph.api.app:create_app --factory   # сервер
+stenograph transcribe meeting.mp4                  # CLI (движок из настроек)
+stenograph transcribe meeting.mp4 --engine whisper # ...или явно
+uvicorn stenograph.api.app:create_app --factory    # сервер
 ```
 
 ## Архитектура

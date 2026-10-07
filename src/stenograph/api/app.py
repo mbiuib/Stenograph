@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from .. import __version__
 from ..config import Settings, get_settings
 from ..domain.models import JobStatus
+from ..engines import available_asr
 from ..service import TranscriptionService, build_default_service
 
 log = logging.getLogger(__name__)
@@ -51,15 +52,27 @@ def create_app(
         return [job.model_dump() for job in jobs]
 
     @app.post("/api/jobs", status_code=201)
-    async def create_job(file: UploadFile, language: str | None = Form(default=None)) -> dict:
+    async def create_job(
+        file: UploadFile,
+        language: str | None = Form(default=None),
+        engine: str | None = Form(default=None),
+    ) -> dict:
         """Upload a media file and queue it for transcription."""
+        if engine is not None and engine not in available_asr():
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown engine '{engine}'; available: {', '.join(available_asr())}",
+            )
         suffix = Path(file.filename or "upload").suffix.lower()
         upload_path = settings.uploads_dir / f"{uuid.uuid4().hex}{suffix}"
         with upload_path.open("wb") as dest:
             while chunk := await file.read(1024 * 1024):
                 dest.write(chunk)
         job = service.submit_file(
-            upload_path, source_name=file.filename or upload_path.name, language=language
+            upload_path,
+            source_name=file.filename or upload_path.name,
+            language=language,
+            engine=engine,
         )
         return job.model_dump()
 

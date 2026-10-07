@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     whisper_model: str = "large-v3"
     language: str = "auto"
 
+    engine: str = "whisper"  # default ASR engine name (see the engines registry)
+
+    # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
+    moss_chunk_sec: float = 300.0
+    moss_chunk_overlap_sec: float = 2.0
+    moss_max_new_tokens: int = 4096
+
     @property
     def uploads_dir(self) -> Path:
         """Where uploaded source files are stored."""

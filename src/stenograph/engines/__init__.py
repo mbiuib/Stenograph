@@ -35,6 +35,7 @@ def get_asr(name: str, settings: Settings) -> AsrEngine:
 
 
 def _register_builtin() -> None:
+    from .moss import MossEngine
     from .whisper import FasterWhisperEngine
 
     register_asr(
@@ -44,6 +45,20 @@ def _register_builtin() -> None:
             models_dir=s.models_dir,
             device=s.device,
             compute_type=s.compute_type,
+        ),
+    )
+    register_asr(
+        "moss",
+        lambda s: MossEngine(
+            models_dir=s.models_dir,
+            device=s.device,
+            hf_token=s.hf_token,
+            chunk_sec=s.moss_chunk_sec,
+            overlap_sec=s.moss_chunk_overlap_sec,
+            max_new_tokens=s.moss_max_new_tokens,
+            ffmpeg=s.ffmpeg,
+            ffprobe=s.ffprobe,
+            work_dir=s.work_dir,
         ),
     )
 

@@ -35,6 +35,8 @@ MAX_SEGMENT_SEC = 25.0
 class FasterWhisperEngine:
     """Whisper via faster-whisper; the model is loaded lazily, once per process."""
 
+    name = "whisper"
+
     def __init__(
         self,
         model: str = "large-v3",

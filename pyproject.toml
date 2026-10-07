@@ -26,6 +26,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
+moss = [
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+    "transformers>=5.6,<6.0",
+    "moss-transcribe-diarize @ git+https://github.com/OpenMOSS/MOSS-Transcribe-Diarize.git@61bc29cd4120be7b5d3b761b64cd5dff57263642",
+]
 
 [project.scripts]
 stenograph = "stenograph.cli:main"
@@ -60,8 +66,25 @@ check_untyped_defs = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["faster_whisper.*", "ctranslate2.*", "av.*"]
+module = [
+    "faster_whisper.*",
+    "ctranslate2.*",
+    "av.*",
+    "torch.*",
+    "transformers.*",
+    "moss_transcribe_diarize.*",
+]
 ignore_missing_imports = true
+
+# Torch wheels come from PyTorch's own index (CUDA 13.0 build for Blackwell).
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -92,11 +92,15 @@ def run_file_job(
         )
 
         job.language = result.language or job.language
+        speakers = sorted({s.speaker for s in result.segments if s.speaker})
         job.meta.update(
             {
                 "language": result.language,
                 "language_probability": result.language_probability,
                 "duration": result.duration,
+                "engine": engine.name,
+                "speakers": speakers,
+                "diarized": bool(speakers),
             }
         )
         if len(result.segments) != streamed:

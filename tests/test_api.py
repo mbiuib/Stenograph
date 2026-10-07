@@ -20,7 +20,7 @@ def _make_service(tmp_path: Path) -> TranscriptionService:
         settings,
         JobRepository(settings.db_path),
         EventBus(),
-        engine_factory=lambda _settings: FakeEngine(),
+        engine_factory=lambda name, settings: FakeEngine(),
     )
     return service
 

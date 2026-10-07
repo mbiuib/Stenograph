@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import get_settings
 from .domain.models import JobStatus
+from .engines import available_asr
 from .logging_setup import setup as setup_logging
 from .service import TranscriptionService, build_default_service
 
@@ -29,6 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     transcribe.add_argument(
         "--language", default=None, help="код языка (ru, en, ...); по умолчанию авто"
     )
+    transcribe.add_argument(
+        "--engine",
+        default=None,
+        help=f"движок ({', '.join(available_asr())}); по умолчанию из настроек",
+    )
     transcribe.add_argument("--quiet", action="store_true", help="печатать только итоговый текст")
 
     args = parser.parse_args(argv)
@@ -44,7 +50,7 @@ def _transcribe(args: argparse.Namespace) -> int:
         return 2
 
     service = build_default_service()
-    job = service.submit_file(args.path.resolve(), language=args.language)
+    job = service.submit_file(args.path.resolve(), language=args.language, engine=args.engine)
     channel = service.bus.subscribe(job.id)
 
     try:

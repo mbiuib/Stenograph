@@ -12,6 +12,8 @@ from stenograph.engines.base import AsrResult, TranscribeOptions, TranscribeProg
 class FakeEngine:
     """ASR engine stand-in: emits two deterministic segments, no GPU needed."""
 
+    name = "fake"
+
     def __init__(self) -> None:
         self.calls: list[str] = []
 
