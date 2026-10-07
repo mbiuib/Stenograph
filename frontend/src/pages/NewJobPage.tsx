@@ -35,9 +35,9 @@ export function NewJobPage() {
     if (engines && !engine) setEngine(engines.default);
   }, [engines, engine]);
 
-  const addFiles = (list: FileList | null) => {
-    if (!list || list.length === 0) return;
-    setFiles((prev) => [...prev, ...Array.from(list)]);
+  const addFiles = (selected: File[]) => {
+    if (selected.length === 0) return;
+    setFiles((prev) => [...prev, ...selected]);
     setErrors([]);
   };
 
@@ -95,7 +95,7 @@ export function NewJobPage() {
           onDrop={(event) => {
             event.preventDefault();
             setDragging(false);
-            addFiles(event.dataTransfer.files);
+            addFiles(Array.from(event.dataTransfer.files));
           }}
           onClick={() => inputRef.current?.click()}
           className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
@@ -110,9 +110,13 @@ export function NewJobPage() {
             type="file"
             multiple
             hidden
+            onClick={(event) => event.stopPropagation()}
             onChange={(event) => {
-              addFiles(event.target.files);
+              // Snapshot before resetting: value="" empties the live FileList
+              // immediately, while React applies the state update later.
+              const selected = Array.from(event.target.files ?? []);
               event.target.value = "";
+              addFiles(selected);
             }}
           />
         </div>
