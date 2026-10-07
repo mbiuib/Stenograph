@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
-import { IconCopy, IconDownload, IconPlay, IconTrash, IconX } from "../components/Icons";
+import { IconCopy, IconDownload, IconRefresh, IconTrash, IconX } from "../components/Icons";
 import { Transcript } from "../components/Transcript";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
 import {
@@ -116,7 +116,7 @@ export function JobDetailPage() {
               disabled={reprocessBusy}
               className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <IconPlay className="size-4" />
+              <IconRefresh className="size-4" />
               {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
             </button>
           )}

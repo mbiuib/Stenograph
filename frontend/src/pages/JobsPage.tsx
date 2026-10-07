@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { IconPlay, IconTrash, IconX } from "../components/Icons";
+import { IconOpen, IconTrash, IconX } from "../components/Icons";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
 import { fmtClock, fmtRelative } from "../format";
 import { usePolling } from "../hooks";
@@ -111,11 +111,11 @@ export function JobsPage() {
                 </span>
                 <div className="flex items-center gap-1">
                   <button
-                    title="Открыть"
+                    title="Открыть задачу"
                     onClick={() => navigate(`/jobs/${job.id}`)}
                     className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-ink"
                   >
-                    <IconPlay className="size-4" />
+                    <IconOpen className="size-4" />
                   </button>
                   {(job.status === "running" || job.status === "queued") && (
                     <button
