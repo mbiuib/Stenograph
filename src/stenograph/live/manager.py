@@ -68,12 +68,16 @@ class LiveManager:
         *,
         transcriber_factory: TranscriberFactory | None = None,
         capture_factory: CaptureFactory | None = None,
+        reprocess: Callable[[Job], Job | None] | None = None,
+        auto_reprocess: bool = False,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._bus = bus
         self._transcriber_factory = transcriber_factory or _default_transcriber_factory(settings)
         self._capture_factory = capture_factory or capture_module.open_source
+        self._reprocess = reprocess
+        self._auto_reprocess = auto_reprocess
         self._session: _LiveSession | None = None
         self._lock = threading.Lock()
 
@@ -139,6 +143,11 @@ class LiveManager:
         with self._lock:
             if self._session is session:
                 self._session = None
+        if self._auto_reprocess and self._reprocess is not None:
+            try:
+                self._reprocess(session.job)
+            except Exception:  # noqa: BLE001 — chaining must never break stopping
+                log.exception("не удалось запустить улучшение записи %s", session.job.id)
         log.info("live-сессия %s остановлена", session.job.id)
         return session.job
 

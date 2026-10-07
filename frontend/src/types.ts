@@ -21,6 +21,11 @@ export interface JobMeta {
   format?: string;
   size?: number;
   has_audio?: boolean;
+  parent?: string;
+  reprocess_job?: string;
+  tracks?: string[];
+  audio?: Record<string, string>;
+  track_durations?: Record<string, number>;
   [key: string]: unknown;
 }
 
@@ -48,6 +53,7 @@ export type JobEvent =
   | { type: "progress"; value: number; message: string }
   | { type: "segment"; segment: Segment }
   | { type: "segments_replaced"; segments: Segment[] }
+  | { type: "meta"; meta: JobMeta }
   | { type: "partial"; track: string; speaker: string; text: string }
   | { type: "level"; track: string; rms: number }
   | { type: "done"; text: string; meta: JobMeta }
@@ -77,6 +83,8 @@ export interface EngineList {
 export interface AppConfig {
   engine: string;
   whisper_model: string;
+  live_model: string;
+  live_auto_reprocess: boolean;
   language: string;
   device: string;
   compute_type: string;

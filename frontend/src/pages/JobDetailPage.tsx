@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
-import { IconCopy, IconDownload, IconTrash, IconX } from "../components/Icons";
+import { IconCopy, IconDownload, IconPlay, IconTrash, IconX } from "../components/Icons";
 import { Transcript } from "../components/Transcript";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
 import {
@@ -18,7 +18,7 @@ import {
   toSrt,
   toTxt,
 } from "../format";
-import { useJobStream, useNow } from "../hooks";
+import { useJobStream, useNow, usePolling } from "../hooks";
 
 const ACTION_CLASS =
   "flex items-center gap-2 rounded-lg border border-edge px-3 py-2 text-sm text-muted hover:text-ink";
@@ -29,6 +29,9 @@ export function JobDetailPage() {
   const now = useNow(1000);
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
+  const { data: engines } = usePolling(() => api.engines(), 60000);
+  const [reprocessBusy, setReprocessBusy] = useState(false);
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
 
   const speakers = useMemo(() => speakerOrder(segments), [segments]);
 
@@ -58,6 +61,17 @@ export function JobDetailPage() {
     await api.deleteJob(job.id).catch(() => {});
     navigate("/jobs");
   };
+  const improve = async () => {
+    setReprocessBusy(true);
+    setReprocessError(null);
+    try {
+      const child = await api.reprocessJob(job.id, engines?.default);
+      navigate(`/jobs/${child.id}`);
+    } catch (err) {
+      setReprocessError(`Не удалось запустить улучшение: ${(err as Error).message}`);
+      setReprocessBusy(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -78,9 +92,34 @@ export function JobDetailPage() {
               <Chip>обработка: {fmtClock(Number(job.meta.processing_seconds))}</Chip>
             )}
             {speakers.length > 0 && <Chip>спикеров: {speakers.length}</Chip>}
+            {job.kind === "reprocess" && <Chip>улучшение записи</Chip>}
+            {job.kind === "reprocess" && job.meta.parent != null && (
+              <Chip>
+                <Link to={`/jobs/${job.meta.parent}`} className="hover:text-accent">
+                  ← исходная Live-сессия
+                </Link>
+              </Chip>
+            )}
+            {job.meta.reprocess_job != null && (
+              <Chip>
+                <Link to={`/jobs/${job.meta.reprocess_job}`} className="hover:text-accent">
+                  улучшенная версия →
+                </Link>
+              </Chip>
+            )}
           </div>
         </div>
         <div className="flex gap-2">
+          {!live && job.kind === "live" && job.meta.audio && !job.meta.reprocess_job && (
+            <button
+              onClick={() => void improve()}
+              disabled={reprocessBusy}
+              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconPlay className="size-4" />
+              {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
+            </button>
+          )}
           {live && (
             <button
               onClick={cancel}
@@ -118,6 +157,7 @@ export function JobDetailPage() {
       )}
 
       {job.status === "error" && job.error && <ErrorBanner message={job.error} />}
+      {reprocessError && <ErrorBanner message={reprocessError} />}
 
       {job.status === "done" && (
         <div className="flex flex-wrap items-center gap-2">

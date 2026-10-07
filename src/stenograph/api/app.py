@@ -39,7 +39,13 @@ def create_app(
     settings = settings or get_settings()
     settings.ensure_dirs()
     service = service or build_default_service(settings)
-    live = live or LiveManager(settings, service.repo, service.bus)
+    live = live or LiveManager(
+        settings,
+        service.repo,
+        service.bus,
+        reprocess=service.reprocess_job,
+        auto_reprocess=settings.live_auto_reprocess,
+    )
 
     app = FastAPI(title="Стенограф", version=__version__)
     app.state.settings = settings
@@ -105,6 +111,23 @@ def create_app(
             raise HTTPException(status_code=404, detail="job not found")
         service.delete(job_id)
 
+    @app.post("/api/jobs/{job_id}/reprocess", status_code=201)
+    def reprocess_job(job_id: str, engine: str | None = Form(default=None)) -> dict:
+        """Queue an offline re-transcription (default engine) of a live recording."""
+        job = service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if engine is not None and engine not in available_asr():
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown engine '{engine}'; available: {', '.join(available_asr())}",
+            )
+        try:
+            child = service.reprocess_job(job, engine=engine)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return child.model_dump()
+
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str, request: Request) -> StreamingResponse:
         """Server-sent events for one job: a snapshot first, then live updates."""
@@ -151,6 +174,8 @@ def create_app(
         return {
             "engine": service.engine_name,
             "whisper_model": settings.whisper_model,
+            "live_model": settings.live_model,
+            "live_auto_reprocess": settings.live_auto_reprocess,
             "language": settings.language,
             "device": settings.device,
             "compute_type": settings.compute_type,

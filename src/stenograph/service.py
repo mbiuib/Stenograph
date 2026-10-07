@@ -18,7 +18,7 @@ from .domain.models import Job, JobStatus
 from .engines import get_asr
 from .engines.base import AsrEngine, TranscribeOptions
 from .events import EventBus
-from .pipeline import run_file_job
+from .pipeline import run_file_job, run_reprocess_job
 from .storage import JobRepository
 
 log = logging.getLogger(__name__)
@@ -68,6 +68,50 @@ class TranscriptionService:
             source_path=str(source_path),
         )
         job.meta["request"] = {"language": language, "engine": engine}
+        return self._enqueue(job)
+
+    def reprocess_job(self, live_job: Job, *, engine: str | None = None) -> Job:
+        """Queue an offline re-transcription of a live session recording.
+
+        One child job per session: every recorded track is re-transcribed from
+        scratch (the default engine — moss — unless overridden) and merged into
+        a single diarized transcript. Idempotent while a run is queued/running:
+        returns the already existing child job.
+        """
+        audio = {
+            str(track): str(path) for track, path in (live_job.meta.get("audio") or {}).items()
+        }
+        tracks = [
+            track
+            for track in ("system", "mic")
+            if audio.get(track) and Path(audio[track]).is_file()
+        ]
+        if not tracks:
+            raise ValueError("у записи нет сохранённых дорожек")
+
+        existing_id = live_job.meta.get("reprocess_job")
+        if existing_id:
+            existing = self.repo.get(str(existing_id))
+            if existing and existing.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+                return existing
+
+        job = Job(kind="reprocess", source_name=f"Улучшение записи — {live_job.source_name}")
+        job.meta["parent"] = live_job.id
+        job.meta["tracks"] = tracks
+        job.meta["audio"] = {track: audio[track] for track in tracks}
+        job.meta["request"] = {
+            "engine": engine,
+            "language": live_job.language or self.settings.language_or_none(),
+        }
+        self._enqueue(job)
+
+        live_job.meta["reprocess_job"] = job.id
+        self.repo.save(live_job)
+        self.bus.publish(live_job.id, {"type": "meta", "meta": live_job.meta})
+        return job
+
+    def _enqueue(self, job: Job) -> Job:
+        """Persist a job and put it on the single-worker queue."""
         self.repo.save(job)
         with self._lock:
             self._cancel_events[job.id] = threading.Event()
@@ -139,7 +183,8 @@ class TranscriptionService:
             language = request.get("language") or self.settings.language_or_none()
             options = TranscribeOptions(language=language)
 
-            run_file_job(
+            runner = run_reprocess_job if job.kind == "reprocess" else run_file_job
+            runner(
                 job,
                 settings=self.settings,
                 repo=self.repo,

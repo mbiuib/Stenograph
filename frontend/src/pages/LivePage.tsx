@@ -17,15 +17,35 @@ const LANGUAGES = [
 export function LivePage() {
   const { data: status, error: statusError } = usePolling(() => api.liveStatus(), 2000);
   const { data: devices } = usePolling(() => api.liveDevices(), 60000);
+  const { data: engines } = usePolling(() => api.engines(), 60000);
+  const { data: config } = usePolling(() => api.config(), 60000);
   const [tracks, setTracks] = useState<Record<string, boolean>>({ system: true, mic: true });
   const [language, setLanguage] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [lastJobId, setLastJobId] = useState<string | null>(null);
+  const [reprocessBusy, setReprocessBusy] = useState(false);
 
   const activeJob = status?.active && status.job ? status.job : null;
   const stream = useJobStream(activeJob?.id);
   const now = useNow(1000);
+  const { data: finishedJob } = usePolling(
+    () => (lastJobId ? api.getJob(lastJobId) : Promise.resolve(null)),
+    3000,
+  );
+
+  const improve = async () => {
+    if (!lastJobId) return;
+    setReprocessBusy(true);
+    setActionError(null);
+    try {
+      await api.reprocessJob(lastJobId, engines?.default);
+    } catch (err) {
+      setActionError(`Не удалось запустить улучшение: ${(err as Error).message}`);
+    } finally {
+      setReprocessBusy(false);
+    }
+  };
 
   const start = async () => {
     const selected = Object.entries(tracks)
@@ -91,12 +111,41 @@ export function LivePage() {
       ) : lastJobId ? (
         <Card bodyClassName="p-6">
           <div className="flex flex-col items-start gap-3">
-            <p className="text-sm">Сессия завершена — транскрипт сохранён и доступен в задачах.</p>
+            <p className="text-sm">Сессия завершена — черновой транскрипт сохранён.</p>
+            {finishedJob?.meta.reprocess_job ? (
+              <>
+                <p className="text-sm text-muted">
+                  Улучшение записи запущено — точный текст с реальными спикерами появится в
+                  отдельной задаче.
+                </p>
+                <Link
+                  to={`/jobs/${finishedJob.meta.reprocess_job}`}
+                  className="rounded-lg bg-gradient-to-r from-accent2 to-accent px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+                >
+                  Открыть улучшенную версию
+                </Link>
+              </>
+            ) : finishedJob?.meta.audio ? (
+              <>
+                <p className="text-sm text-muted">
+                  {config?.live_auto_reprocess
+                    ? "Улучшение записи запускается автоматически…"
+                    : `Перепрогнать запись с нуля движком ${engines?.default ?? "moss"} — точнее и с реальными спикерами.`}
+                </p>
+                <button
+                  onClick={() => void improve()}
+                  disabled={reprocessBusy}
+                  className="rounded-lg bg-gradient-to-r from-accent2 to-accent px-4 py-2 text-sm font-medium text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
+                </button>
+              </>
+            ) : null}
             <Link
               to={`/jobs/${lastJobId}`}
-              className="rounded-lg bg-gradient-to-r from-accent2 to-accent px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+              className="text-sm text-muted underline-offset-4 hover:text-ink hover:underline"
             >
-              Открыть транскрипт
+              Открыть черновой транскрипт
             </Link>
           </div>
         </Card>
@@ -207,8 +256,10 @@ function StartPanel({
           различает — диаризацию сделает точный движок при повторной обработке.
         </p>
         <p>
-          Аудио обеих дорожек сохраняется (data/live) — запись можно заново
-          обработать любым движком через CLI, когда нужна максимальная точность.
+          Аудио обеих дорожек сохраняется. После остановки запись автоматически
+          уходит на повторную обработку точным движком (moss): итоговая задача —
+          с реальными спикерами; при отключённом автозапуске есть кнопка
+          «Улучшить» на странице задачи.
         </p>
       </Card>
     </div>

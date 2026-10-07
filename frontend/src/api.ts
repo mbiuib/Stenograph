@@ -38,6 +38,12 @@ export const api = {
   cancelJob: (id: string): Promise<{ cancelled: boolean }> =>
     request<{ cancelled: boolean }>(`/api/jobs/${id}/cancel`, { method: "POST" }),
 
+  reprocessJob: (id: string, engine?: string): Promise<Job> => {
+    const form = new FormData();
+    if (engine) form.append("engine", engine);
+    return request<Job>(`/api/jobs/${id}/reprocess`, { method: "POST", body: form });
+  },
+
   deleteJob: async (id: string): Promise<void> => {
     const response = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
     if (!response.ok && response.status !== 204) {

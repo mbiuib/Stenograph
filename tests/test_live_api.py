@@ -134,3 +134,38 @@ def test_live_capture_failure_marks_job_error(tmp_path: Path) -> None:
     jobs = service.list_jobs()
     assert jobs and jobs[0].status == "error"
     assert "захват" in (jobs[0].error or "")
+
+
+def test_live_auto_reprocess_chains_after_stop(tmp_path: Path) -> None:
+    """With auto_reprocess on, stopping a session hands the recording over."""
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    service = TranscriptionService(
+        settings, repo, bus, engine_factory=lambda name, s: FakeEngine()
+    )
+    handed_over: list[str] = []
+
+    def reprocess(job):
+        handed_over.append(job.id)
+        return None
+
+    live = LiveManager(
+        settings,
+        repo,
+        bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+        capture_factory=_capture_factory,
+        reprocess=reprocess,
+        auto_reprocess=True,
+    )
+    client = TestClient(create_app(settings=settings, service=service, live=live))
+
+    response = client.post("/api/live/start", data={"tracks": "system"})
+    assert response.status_code == 201
+    job_id = response.json()["id"]
+    stopped = client.post("/api/live/stop")
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "done"
+    assert handed_over == [job_id]

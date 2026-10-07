@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     live_chunk_sec: float = 0.2
     live_step_sec: float = 0.8
     live_max_window_sec: float = 25.0
+    live_auto_reprocess: bool = True  # re-run the recording through MOSS after stop
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

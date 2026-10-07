@@ -100,6 +100,9 @@ export function useJobStream(jobId: string | undefined): {
         case "segments_replaced":
           setSegments(event.segments);
           break;
+        case "meta":
+          setJob((prev) => (prev ? { ...prev, meta: event.meta } : prev));
+          break;
         case "partial":
           setPartials((prev) => ({ ...prev, [event.speaker]: event.text }));
           break;
