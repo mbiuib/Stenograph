@@ -44,6 +44,8 @@ class TranscriptionService:
         self._engine_factory = engine_factory
         self._engines: dict[str, AsrEngine] = {}  # created lazily on the worker thread
         self._queue: queue.Queue[str] = queue.Queue()
+        self._waiting: list[str] = []
+        self._active_job_id: str | None = None
         self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._worker = threading.Thread(
@@ -69,6 +71,7 @@ class TranscriptionService:
         self.repo.save(job)
         with self._lock:
             self._cancel_events[job.id] = threading.Event()
+            self._waiting.append(job.id)
         self._queue.put(job.id)
         log.info("queued job %s (%s)", job.id, job.source_name)
         return job
@@ -86,15 +89,24 @@ class TranscriptionService:
         """Fetch a job from the repository."""
         return self.repo.get(job_id)
 
-    def list(
+    def list_jobs(
         self, *, status: JobStatus | None = None, limit: int = 100, offset: int = 0
     ) -> list[Job]:
         """List jobs, newest first."""
-        return self.repo.list(status=status, limit=limit, offset=offset)
+        return self.repo.list_jobs(status=status, limit=limit, offset=offset)
 
     def delete(self, job_id: str) -> None:
         """Delete a job from the repository."""
         self.repo.delete(job_id)
+
+    def queue_view(self) -> dict:
+        """Snapshot of the work queue: the active job and the waiting ones."""
+        with self._lock:
+            active_id = self._active_job_id
+            waiting_ids = list(self._waiting)
+        active = self.repo.get(active_id) if active_id else None
+        waiting = [job for job in (self.repo.get(item) for item in waiting_ids) if job]
+        return {"active": active, "waiting": waiting}
 
     # -- worker -------------------------------------------------------------
 
@@ -110,29 +122,36 @@ class TranscriptionService:
 
     def _run_job(self, job_id: str) -> None:
         job = self.repo.get(job_id)
-        if job is None:
-            log.warning("job %s disappeared before execution", job_id)
-            return
         with self._lock:
-            cancel_event = self._cancel_events.get(job_id) or threading.Event()
-            self._cancel_events[job_id] = cancel_event
+            if job_id in self._waiting:
+                self._waiting.remove(job_id)
+            self._active_job_id = job_id
+        try:
+            if job is None:
+                log.warning("job %s disappeared before execution", job_id)
+                return
+            with self._lock:
+                cancel_event = self._cancel_events.get(job_id) or threading.Event()
+                self._cancel_events[job_id] = cancel_event
 
-        request = job.meta.get("request") or {}
-        engine = self._engine_for(request.get("engine") or self.engine_name)
-        language = request.get("language") or self.settings.language_or_none()
-        options = TranscribeOptions(language=language)
+            request = job.meta.get("request") or {}
+            engine = self._engine_for(request.get("engine") or self.engine_name)
+            language = request.get("language") or self.settings.language_or_none()
+            options = TranscribeOptions(language=language)
 
-        run_file_job(
-            job,
-            settings=self.settings,
-            repo=self.repo,
-            bus=self.bus,
-            engine=engine,
-            options=options,
-            is_cancelled=cancel_event.is_set,
-        )
-        with self._lock:
-            self._cancel_events.pop(job_id, None)
+            run_file_job(
+                job,
+                settings=self.settings,
+                repo=self.repo,
+                bus=self.bus,
+                engine=engine,
+                options=options,
+                is_cancelled=cancel_event.is_set,
+            )
+        finally:
+            with self._lock:
+                self._cancel_events.pop(job_id, None)
+                self._active_job_id = None
 
     def _engine_for(self, name: str) -> AsrEngine:
         """Return (and cache) the engine instance for the given name."""

@@ -28,9 +28,9 @@ def test_roundtrip(tmp_path: Path) -> None:
     again = repo.get(job.id)
     assert again is not None and again.progress == 100
 
-    assert [j.id for j in repo.list()] == [job.id]
-    assert repo.list(status=JobStatus.ERROR) == []
+    assert [j.id for j in repo.list_jobs()] == [job.id]
+    assert repo.list_jobs(status=JobStatus.ERROR) == []
 
     repo.delete(job.id)
     assert repo.get(job.id) is None
-    assert repo.list() == []
+    assert repo.list_jobs() == []

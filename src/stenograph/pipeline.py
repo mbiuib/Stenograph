@@ -115,6 +115,9 @@ def run_file_job(
         job.text = "\n".join(s.text for s in result.segments).strip()
 
         job.finished_at = time.time()
+        job.meta["processing_seconds"] = round(
+            job.finished_at - (job.started_at or job.finished_at), 2
+        )
         transition(JobStatus.DONE, "Готово", 100)
         emit({"type": "done", "text": job.text, "meta": job.meta})
         log.info(

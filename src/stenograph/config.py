@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
 
+    frontend_dist: Path | None = None  # built React app; default: <repo>/frontend/dist
+
     device: str = "cuda"
     compute_type: str = "float16"
     whisper_model: str = "large-v3"

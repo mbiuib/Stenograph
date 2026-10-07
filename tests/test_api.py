@@ -33,6 +33,38 @@ def test_health(tmp_path: Path) -> None:
     assert response.json()["status"] == "ok"
 
 
+def test_dashboard_endpoints(tmp_path: Path) -> None:
+    """Stats, queue, engines and config endpoints return the expected shapes."""
+    service = _make_service(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service))
+
+    engines = client.get("/api/engines").json()
+    assert "whisper" in engines["available"] and "moss" in engines["available"]
+    assert engines["default"] == service.engine_name
+
+    config = client.get("/api/config").json()
+    assert config["engine"] == service.engine_name
+
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"data", "audio/wav")})
+    assert response.status_code == 201
+    job_id = response.json()["id"]
+
+    deadline = monotonic() + 5
+    while monotonic() < deadline:
+        if client.get(f"/api/jobs/{job_id}").json()["status"] == "done":
+            break
+        sleep(0.05)
+
+    stats = client.get("/api/stats").json()
+    assert stats["jobs"]["total"] >= 1
+    assert stats["jobs"]["by_status"].get("done", 0) >= 1
+    assert stats["audio_seconds"] >= 2.0  # the fake engine reports 2.0 seconds
+    assert stats["recent"]
+
+    queue = client.get("/api/queue").json()
+    assert "active" in queue and "waiting" in queue
+
+
 def test_upload_and_complete(tmp_path: Path) -> None:
     """Uploading a file queues it, the worker finishes it, polling returns the text."""
     service = _make_service(tmp_path)

@@ -94,3 +94,14 @@ whisper+pyannote, плата — скорость, поэтому live оста�
 3. Live-спикеры берутся из источника (две дорожки / participant id в Jitsi),
    а не акустической диаризацией на лету.
 4. Один GPU-воркер; live-сессии получат приоритет над файловой очередью.
+
+## Веб-интерфейс (M2)
+
+React + TypeScript + Vite + Tailwind, собирается в `frontend/dist` и
+раздаётся тем же FastAPI (SPA-fallback; API-роуты имеют приоритет, неизвестные
+`/api/*` — 404). В dev-режиме `npm run dev` проксирует `/api` на :8000.
+
+Данные: дашборд — `/api/stats` + `/api/queue` (поллинг ~2 c, ETA считается на
+клиенте от прогресса и времени старта), страница задачи —
+`/api/jobs/{id}/events` (SSE: snapshot → status/progress/segment →
+segments_replaced → done/error). Контракт событий — тот же, что у CLI.

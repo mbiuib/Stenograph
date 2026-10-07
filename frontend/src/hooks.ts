@@ -1,0 +1,155 @@
+/** React hooks: polling, live job stream, ticking clock. */
+import { useEffect, useRef, useState } from "react";
+import { api } from "./api";
+import type { Job, JobEvent, Segment } from "./types";
+
+/** Poll an async function on an interval; errors are surfaced, data is retained. */
+export function usePolling<T>(
+  fn: () => Promise<T>,
+  intervalMs: number,
+): { data: T | null; error: string | null } {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+
+  useEffect(() => {
+    let alive = true;
+    const tick = () => {
+      fnRef.current()
+        .then((value) => {
+          if (alive) {
+            setData(value);
+            setError(null);
+          }
+        })
+        .catch((err: Error) => {
+          if (alive) setError(err.message);
+        });
+    };
+    tick();
+    const timer = window.setInterval(tick, intervalMs);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [intervalMs]);
+
+  return { data, error };
+}
+
+/** A value that re-renders on a timer (for ETAs and elapsed labels). */
+export function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return now;
+}
+
+/** Load a job and follow its live event stream until it reaches a terminal state. */
+export function useJobStream(jobId: string | undefined): {
+  job: Job | null;
+  segments: Segment[];
+  loading: boolean;
+  error: string | null;
+} {
+  const [job, setJob] = useState<Job | null>(null);
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const sourceRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    if (!jobId) return;
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setJob(null);
+    setSegments([]);
+
+    const closeStream = () => {
+      sourceRef.current?.close();
+      sourceRef.current = null;
+    };
+
+    const apply = (event: JobEvent) => {
+      switch (event.type) {
+        case "snapshot":
+          setJob(event.job);
+          setSegments(event.job.segments);
+          break;
+        case "status":
+          setJob((prev) =>
+            prev ? { ...prev, status: event.status, message: event.message, progress: event.progress } : prev,
+          );
+          break;
+        case "progress":
+          setJob((prev) => (prev ? { ...prev, progress: event.value, message: event.message } : prev));
+          break;
+        case "segment":
+          setSegments((prev) => [...prev, event.segment]);
+          break;
+        case "segments_replaced":
+          setSegments(event.segments);
+          break;
+        case "done":
+          setJob((prev) =>
+            prev ? { ...prev, status: "done", progress: 100, text: event.text, meta: event.meta } : prev,
+          );
+          closeStream();
+          void api.getJob(jobId).then((final) => {
+            if (alive) {
+              setJob(final);
+              setSegments(final.segments);
+            }
+          });
+          break;
+        case "error":
+          setJob((prev) => (prev ? { ...prev, status: "error", error: event.message } : prev));
+          closeStream();
+          break;
+        case "cancelled":
+          setJob((prev) => (prev ? { ...prev, status: "cancelled" } : prev));
+          closeStream();
+          break;
+      }
+    };
+
+    void api
+      .getJob(jobId)
+      .then((initial) => {
+        if (!alive) return;
+        setJob(initial);
+        setSegments(initial.segments);
+        setLoading(false);
+        if (initial.status === "queued" || initial.status === "running") {
+          const source = new EventSource(`/api/jobs/${jobId}/events`);
+          sourceRef.current = source;
+          source.onmessage = (message) => {
+            try {
+              apply(JSON.parse(message.data) as JobEvent);
+            } catch {
+              /* ignore malformed frames */
+            }
+          };
+          // EventSource reconnects automatically on transient errors.
+        }
+      })
+      .catch((err: Error) => {
+        if (alive) {
+          setError(err.message);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      alive = false;
+      closeStream();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+
+  return { job, segments, loading, error };
+}

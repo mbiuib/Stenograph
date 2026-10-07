@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 from .domain.models import Job, JobStatus
@@ -106,7 +107,7 @@ class JobRepository:
             ).fetchone()
         return _row_to_job(row) if row else None
 
-    def list(
+    def list_jobs(
         self, *, status: JobStatus | None = None, limit: int = 100, offset: int = 0
     ) -> list[Job]:
         """List jobs, newest first."""
@@ -125,6 +126,59 @@ class JobRepository:
         """Remove a job."""
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+    def count_by_status(self) -> dict[str, int]:
+        """Job counts per status."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
+            ).fetchall()
+        return {row["status"]: row["count"] for row in rows}
+
+    def totals(self) -> dict[str, float]:
+        """Aggregated audio seconds and processing seconds over finished jobs."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT "
+                "COALESCE(SUM(json_extract(meta, '$.duration')), 0) AS audio_seconds, "
+                "COALESCE(SUM(json_extract(meta, '$.processing_seconds')), 0) "
+                "AS processing_seconds "
+                "FROM jobs WHERE status = 'done'"
+            ).fetchone()
+        audio = float(row["audio_seconds"] or 0.0) if row else 0.0
+        processing = float(row["processing_seconds"] or 0.0) if row else 0.0
+        return {"audio_seconds": audio, "processing_seconds": processing}
+
+    def activity(self, days: int = 30) -> list[dict]:
+        """Daily job counts and audio seconds for the last N days."""
+        threshold = time.time() - days * 86400
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT date(created_at, 'unixepoch', 'localtime') AS day, "
+                "COUNT(*) AS jobs, "
+                "COALESCE(SUM(json_extract(meta, '$.duration')), 0) AS audio_seconds "
+                "FROM jobs WHERE created_at >= ? "
+                "GROUP BY day ORDER BY day",
+                (threshold,),
+            ).fetchall()
+        return [
+            {
+                "date": row["day"],
+                "jobs": row["jobs"],
+                "audio_seconds": float(row["audio_seconds"] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def engine_usage(self) -> list[dict]:
+        """Finished job counts per ASR engine."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT COALESCE(json_extract(meta, '$.engine'), '—') AS engine, "
+                "COUNT(*) AS jobs "
+                "FROM jobs WHERE status = 'done' GROUP BY engine ORDER BY jobs DESC"
+            ).fetchall()
+        return [{"engine": row["engine"], "jobs": row["jobs"]} for row in rows]
 
 
 def _row_to_job(row: sqlite3.Row) -> Job:

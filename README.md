@@ -15,8 +15,13 @@ HTTP API с SSE-событиями, CLI, шина событий, реестр �
 длинных файлов по 300 с с перехлёстом, дедупликация границ, метки спикеров;
 переключается настройкой `MEETSCRIBE_ENGINE=moss` или флагом `--engine`.
 
+**Milestone 2 — веб-интерфейс** (React + TypeScript + Vite + Tailwind): дашборд
+(статистика, активная задача с прогрессом и ETA «сколько осталось», очередь,
+график активности), история задач с фильтрами, загрузка файлов, страница задачи
+с живым SSE-транскриптом, спикерами и экспортом (TXT/SRT/JSON).
+
 Дальше по плану: live-захват (WASAPI loopback + микрофон), Jitsi-мост
-(streaming-whisper для Jigasi), веб-интерфейс (React), LLM-постобработка.
+(streaming-whisper для Jigasi), LLM-постобработка.
 
 ## Быстрый старт
 
@@ -28,9 +33,11 @@ uv pip install --python .venv/Scripts/python.exe "torch==2.11.0" "torchaudio==2.
 uv pip install --python .venv/Scripts/python.exe -e ".[moss]"
 cp .env.example .env    # поправьте пути (ffmpeg, каталог моделей)
 
+cd frontend && npm install && npm run build && cd ..   # веб-интерфейс
+
 stenograph transcribe meeting.mp4                  # CLI (движок из настроек)
 stenograph transcribe meeting.mp4 --engine whisper # ...или явно
-uvicorn stenograph.api.app:create_app --factory    # сервер
+uvicorn stenograph.api.app:create_app --factory    # сервер + веб (http://127.0.0.1:8000)
 ```
 
 ## Архитектура

@@ -16,7 +16,8 @@ from pathlib import Path
 
 import anyio
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..config import Settings, get_settings
@@ -48,7 +49,7 @@ def create_app(
     def list_jobs(status: str | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
         """List recent jobs, newest first."""
         status_enum = JobStatus(status) if status else None
-        jobs = service.list(status=status_enum, limit=limit, offset=offset)
+        jobs = service.list_jobs(status=status_enum, limit=limit, offset=offset)
         return [job.model_dump() for job in jobs]
 
     @app.post("/api/jobs", status_code=201)
@@ -132,6 +133,73 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/api/engines")
+    def list_engines() -> dict:
+        """Registered ASR engines and the default one."""
+        return {"available": available_asr(), "default": service.engine_name}
+
+    @app.get("/api/config")
+    def get_config() -> dict:
+        """Non-secret effective settings, for the UI."""
+        return {
+            "engine": service.engine_name,
+            "whisper_model": settings.whisper_model,
+            "language": settings.language,
+            "device": settings.device,
+            "compute_type": settings.compute_type,
+            "models_dir": str(settings.models_dir) if settings.models_dir else None,
+        }
+
+    @app.get("/api/queue")
+    def get_queue() -> dict:
+        """Active and waiting jobs (the worker processes strictly FIFO)."""
+        view = service.queue_view()
+        active = view["active"]
+        return {
+            "active": active.model_dump() if active else None,
+            "waiting": [job.model_dump() for job in view["waiting"]],
+        }
+
+    @app.get("/api/stats")
+    def get_stats() -> dict:
+        """Aggregated statistics for the dashboard."""
+        counts = service.repo.count_by_status()
+        totals = service.repo.totals()
+        speed = (
+            totals["audio_seconds"] / totals["processing_seconds"]
+            if totals["processing_seconds"] > 0
+            else None
+        )
+        return {
+            "jobs": {"total": sum(counts.values()), "by_status": counts},
+            "audio_seconds": totals["audio_seconds"],
+            "processing_seconds": totals["processing_seconds"],
+            "avg_speed_factor": round(speed, 2) if speed else None,
+            "engines": service.repo.engine_usage(),
+            "activity": service.repo.activity(30),
+            "recent": [job.model_dump() for job in service.list_jobs(limit=8)],
+        }
+
+    # -- static frontend (built by Vite into <repo>/frontend/dist) ----------
+
+    frontend_dist = settings.frontend_dist or (
+        Path(__file__).resolve().parents[3] / "frontend" / "dist"
+    )
+    if frontend_dist.is_dir():
+        assets_dir = frontend_dist / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        @app.get("/{path:path}", include_in_schema=False)
+        async def spa_fallback(path: str) -> FileResponse:
+            """Serve the SPA shell; unknown /api paths still return 404."""
+            if path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="not found")
+            candidate = frontend_dist / path
+            if path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(frontend_dist / "index.html")
 
     return app
 
