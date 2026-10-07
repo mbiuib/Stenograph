@@ -48,6 +48,8 @@ export type JobEvent =
   | { type: "progress"; value: number; message: string }
   | { type: "segment"; segment: Segment }
   | { type: "segments_replaced"; segments: Segment[] }
+  | { type: "partial"; track: string; speaker: string; text: string }
+  | { type: "level"; track: string; rms: number }
   | { type: "done"; text: string; meta: JobMeta }
   | { type: "error"; message: string }
   | { type: "cancelled" };
@@ -79,4 +81,16 @@ export interface AppConfig {
   device: string;
   compute_type: string;
   models_dir: string | null;
+}
+
+export interface LiveStatus {
+  active: boolean;
+  supported: boolean;
+  job?: Job;
+}
+
+export interface LiveDevices {
+  supported: boolean;
+  devices: { loopback?: string; microphone?: string };
+  error?: string;
 }

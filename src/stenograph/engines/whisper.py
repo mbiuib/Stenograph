@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .. import cuda
 from ..domain.errors import JobCancelled
 from ..domain.models import Segment
@@ -152,6 +154,46 @@ class FasterWhisperEngine:
                 for i, s in enumerate(final_segments)
             ],
         )
+
+    def transcribe_window(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str | None = None,
+        beam_size: int = 1,
+        no_speech_threshold: float = 0.6,
+    ) -> list[tuple[float, float, str]]:
+        """Transcribe a short float32 16 kHz window for the live mode.
+
+        Returns word tuples ``(start, end, text)`` relative to the window start;
+        greedy decoding keeps each streaming step cheap.
+        """
+        model = self._load()
+        segments, _info = model.transcribe(
+            audio,
+            language=language,
+            beam_size=beam_size,
+            vad_filter=False,
+            word_timestamps=True,
+            temperature=0.0,
+            no_speech_threshold=no_speech_threshold,
+            log_prob_threshold=-1.0,
+            compression_ratio_threshold=2.4,
+            condition_on_previous_text=False,
+        )
+        words: list[tuple[float, float, str]] = []
+        for segment in segments:
+            for word in getattr(segment, "words", None) or []:
+                text = str(getattr(word, "word", "") or "").strip()
+                if text:
+                    words.append(
+                        (
+                            float(getattr(word, "start", 0.0) or 0.0),
+                            float(getattr(word, "end", 0.0) or 0.0),
+                            text,
+                        )
+                    )
+        return words
 
 
 def resplit_long_segments(

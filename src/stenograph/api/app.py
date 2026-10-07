@@ -23,22 +23,28 @@ from .. import __version__
 from ..config import Settings, get_settings
 from ..domain.models import JobStatus
 from ..engines import available_asr
+from ..live.capture import CaptureError, capture_supported, describe_devices
+from ..live.manager import LiveManager
 from ..service import TranscriptionService, build_default_service
 
 log = logging.getLogger(__name__)
 
 
 def create_app(
-    settings: Settings | None = None, service: TranscriptionService | None = None
+    settings: Settings | None = None,
+    service: TranscriptionService | None = None,
+    live: LiveManager | None = None,
 ) -> FastAPI:
-    """Build the web application; inject a service for tests."""
+    """Build the web application; inject a service/live manager for tests."""
     settings = settings or get_settings()
     settings.ensure_dirs()
     service = service or build_default_service(settings)
+    live = live or LiveManager(settings, service.repo, service.bus)
 
     app = FastAPI(title="Стенограф", version=__version__)
     app.state.settings = settings
     app.state.service = service
+    app.state.live = live
 
     @app.get("/api/health")
     def health() -> dict:
@@ -180,6 +186,47 @@ def create_app(
             "activity": service.repo.activity(30),
             "recent": [job.model_dump() for job in service.list_jobs(limit=8)],
         }
+
+    # -- live sessions -------------------------------------------------------
+
+    @app.get("/api/live/status")
+    def live_status() -> dict:
+        """Live session state: active or idle, plus capture availability."""
+        return live.status()
+
+    @app.get("/api/live/devices")
+    def live_devices() -> dict:
+        """Default loopback/microphone device names shown by the live UI."""
+        try:
+            devices = describe_devices()
+        except Exception as exc:  # noqa: BLE001 — report, do not crash the API
+            return {"supported": capture_supported(), "devices": {}, "error": str(exc)}
+        return {"supported": capture_supported(), "devices": devices}
+
+    @app.post("/api/live/start", status_code=201)
+    def live_start(
+        tracks: str | None = Form(default=None),
+        language: str | None = Form(default=None),
+    ) -> dict:
+        """Start a live capture session; tracks is a comma-separated list."""
+        selected = [item.strip() for item in (tracks or "").split(",") if item.strip()]
+        try:
+            job = live.start(selected or None, language)
+        except CaptureError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:  # session already running / bad tracks
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return job.model_dump()
+
+    @app.post("/api/live/stop")
+    def live_stop() -> dict:
+        """Stop the active session and return the finalized job."""
+        job = live.stop()
+        if job is None:
+            raise HTTPException(status_code=404, detail="нет активной live-сессии")
+        return job.model_dump()
 
     # -- static frontend (built by Vite into <repo>/frontend/dist) ----------
 

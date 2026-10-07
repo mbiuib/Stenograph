@@ -52,11 +52,15 @@ export function useNow(intervalMs = 1000): number {
 export function useJobStream(jobId: string | undefined): {
   job: Job | null;
   segments: Segment[];
+  partials: Record<string, string>;
+  levels: Record<string, number>;
   loading: boolean;
   error: string | null;
 } {
   const [job, setJob] = useState<Job | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
+  const [partials, setPartials] = useState<Record<string, string>>({});
+  const [levels, setLevels] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
@@ -68,6 +72,8 @@ export function useJobStream(jobId: string | undefined): {
     setError(null);
     setJob(null);
     setSegments([]);
+    setPartials({});
+    setLevels({});
 
     const closeStream = () => {
       sourceRef.current?.close();
@@ -94,7 +100,14 @@ export function useJobStream(jobId: string | undefined): {
         case "segments_replaced":
           setSegments(event.segments);
           break;
+        case "partial":
+          setPartials((prev) => ({ ...prev, [event.speaker]: event.text }));
+          break;
+        case "level":
+          setLevels((prev) => ({ ...prev, [event.track]: event.rms }));
+          break;
         case "done":
+          setPartials({});
           setJob((prev) =>
             prev ? { ...prev, status: "done", progress: 100, text: event.text, meta: event.meta } : prev,
           );
@@ -151,5 +164,5 @@ export function useJobStream(jobId: string | undefined): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);
 
-  return { job, segments, loading, error };
+  return { job, segments, partials, levels, loading, error };
 }

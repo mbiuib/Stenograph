@@ -39,6 +39,12 @@ class Settings(BaseSettings):
 
     engine: str = "whisper"  # default ASR engine name (see the engines registry)
 
+    # Live mode: WASAPI capture + local-agreement streaming on whisper.
+    live_model: str = "large-v3-turbo"
+    live_chunk_sec: float = 0.2
+    live_step_sec: float = 0.8
+    live_max_window_sec: float = 25.0
+
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0
     moss_chunk_overlap_sec: float = 2.0

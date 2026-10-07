@@ -29,6 +29,10 @@ export function Layout() {
             <IconPlus className="size-5 shrink-0" />
             <span className="hidden md:block">Новая задача</span>
           </NavLink>
+          <NavLink to="/live" className={linkClass}>
+            <IconMic className="size-5 shrink-0" />
+            <span className="hidden md:block">Live</span>
+          </NavLink>
         </nav>
         <div className="mt-auto hidden px-1 text-xs text-muted md:block">
           <a className="hover:text-ink" href="/docs" target="_blank" rel="noreferrer">

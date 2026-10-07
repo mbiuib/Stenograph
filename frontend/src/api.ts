@@ -1,5 +1,13 @@
 /** Thin typed wrapper around the backend REST API. */
-import type { AppConfig, EngineList, Job, QueueSnapshot, Stats } from "./types";
+import type {
+  AppConfig,
+  EngineList,
+  Job,
+  LiveDevices,
+  LiveStatus,
+  QueueSnapshot,
+  Stats,
+} from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -41,4 +49,14 @@ export const api = {
   queue: (): Promise<QueueSnapshot> => request<QueueSnapshot>("/api/queue"),
   engines: (): Promise<EngineList> => request<EngineList>("/api/engines"),
   config: (): Promise<AppConfig> => request<AppConfig>("/api/config"),
+
+  liveStatus: (): Promise<LiveStatus> => request<LiveStatus>("/api/live/status"),
+  liveDevices: (): Promise<LiveDevices> => request<LiveDevices>("/api/live/devices"),
+  liveStart: (tracks: string[], language?: string): Promise<Job> => {
+    const form = new FormData();
+    form.append("tracks", tracks.join(","));
+    if (language) form.append("language", language);
+    return request<Job>("/api/live/start", { method: "POST", body: form });
+  },
+  liveStop: (): Promise<Job> => request<Job>("/api/live/stop", { method: "POST" }),
 };

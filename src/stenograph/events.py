@@ -9,6 +9,8 @@ reused by the live mode and the Jitsi bridge):
 - {"type": "progress", "value": int, "message": str}
 - {"type": "segment", "segment": {...}}
 - {"type": "segments_replaced", "segments": [...]}
+- {"type": "partial", "track": str, "speaker": str, "text": str}  # live: unstable tail
+- {"type": "level", "track": str, "rms": float}                  # live: input level meter
 - {"type": "done", "text": str, "meta": {...}}
 - {"type": "error", "message": str}
 - {"type": "cancelled"}
