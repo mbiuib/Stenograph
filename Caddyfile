@@ -1,0 +1,17 @@
+# Локальный HTTPS для «Стенографа»: Caddy терминирует TLS на :443 и
+# проксирует всё (страницы, API, SSE, WebSocket) на приложение 127.0.0.1:8000.
+#
+# Сертификат подменяется без правки кода:
+#   * по умолчанию — certs/stenograph.crt и certs/stenograph.key;
+#   * либо переменные окружения TLS_CERT_FILE / TLS_KEY_FILE;
+#   * подходит любой X.509 PEM (наш локальный CA, корпоративный CA, Let's Encrypt).
+# После замены файлов: `caddy reload` (или перезапуск start_https.bat) —
+# приложение перезапускать не нужно.
+{
+	admin off
+}
+
+:443 {
+	tls {$TLS_CERT_FILE:certs/stenograph.crt} {$TLS_KEY_FILE:certs/stenograph.key}
+	reverse_proxy 127.0.0.1:8000
+}
