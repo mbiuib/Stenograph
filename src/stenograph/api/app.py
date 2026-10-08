@@ -6,6 +6,7 @@ from the bus. Business logic lives in the service and the pipeline.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -36,6 +37,7 @@ from ..domain.models import JobStatus
 from ..engines import available_asr
 from ..live.capture import CaptureError, capture_supported, describe_devices
 from ..live.manager import LiveManager
+from ..live.web import parse_upload_frame
 from ..service import TranscriptionService, build_default_service
 
 log = logging.getLogger(__name__)
@@ -286,6 +288,79 @@ def create_app(
         if job is None:
             raise HTTPException(status_code=404, detail="нет активной live-сессии")
         return job.model_dump()
+
+    # -- browser live capture (WebSocket upload) ------------------------------
+
+    @app.websocket("/ws/live")
+    async def live_upload(websocket: WebSocket) -> None:
+        """Browser live capture: the page uploads microphone/system audio.
+
+        Handshake (text JSON): ``{"type":"start","tracks":["mic","system"],
+        "language":"ru"}``; the answer is ``{"type":"ready","job_id":…}``.
+        Binary frames: one track byte (0 = mic, 1 = system) + int16 LE
+        16 kHz mono PCM. ``{"type":"stop"}`` or a disconnect finalizes the
+        job and chains the quality re-pass over the recorded audio.
+        """
+        await websocket.accept()
+        session = None
+        try:
+            message = await websocket.receive()
+            text = message.get("text")
+            if message.get("type") != "websocket.receive" or not text:
+                raise RuntimeError("первым сообщением должен быть JSON start")
+            try:
+                command = json.loads(text)
+            except ValueError as exc:
+                raise RuntimeError("не разобрать start-сообщение") from exc
+            if command.get("type") != "start":
+                raise RuntimeError("первым сообщением должен быть start")
+            requested = [name for name in command.get("tracks") or [] if name in ("mic", "system")]
+            session = live.start_web(requested or None, command.get("language") or None)
+            log.info(
+                "live: браузерная сессия %s подключена (%s)",
+                session.job.id,
+                ", ".join(session.tracks),
+            )
+            await websocket.send_json(
+                {
+                    "type": "ready",
+                    "job_id": session.job.id,
+                    "tracks": list(session.tracks),
+                    "sample_rate": 16000,
+                }
+            )
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    log.info("live: браузерная сессия %s отключилась", session.job.id)
+                    break
+                data = message.get("bytes")
+                if data is not None:
+                    parsed = parse_upload_frame(data)
+                    if parsed is not None:
+                        session.feed(*parsed)
+                    continue
+                text = message.get("text")
+                if not text:
+                    continue
+                try:
+                    command = json.loads(text)
+                except ValueError:
+                    continue
+                if command.get("type") == "stop":
+                    break
+        except RuntimeError as exc:
+            log.warning("live: не удалось начать браузерную сессию: %s", exc)
+            try:
+                await websocket.send_json({"type": "error", "message": str(exc)})
+            except Exception:  # noqa: BLE001 — the client may already be gone
+                log.debug("live: не удалось отправить ошибку клиенту", exc_info=True)
+        finally:
+            if session is not None:
+                await anyio.to_thread.run_sync(live.stop)
+                log.info("live: браузерная сессия %s закрыта", session.job.id)
+            with contextlib.suppress(Exception):  # closing a dead socket is fine
+                await websocket.close()
 
     # -- Jigasi bridge (streaming-whisper protocol) ---------------------------
 

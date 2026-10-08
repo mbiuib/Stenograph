@@ -118,7 +118,37 @@ class LiveManager:
         return {"active": True, "supported": supported, "job": session.job.model_dump()}
 
     def start(self, tracks: list[str] | None = None, language: str | None = None) -> Job:
-        """Start a live session; raises RuntimeError when one is already running."""
+        """Start a server-side capture session; raises RuntimeError when one is running."""
+        return self._begin(
+            tracks,
+            language,
+            capture_factory=self._capture_factory,
+            source_name="Live-сессия",
+            capture_mode=None,
+        ).job
+
+    def start_web(
+        self, tracks: list[str] | None = None, language: str | None = None
+    ) -> _LiveSession:
+        """Start a browser-upload session; audio arrives via ``session.feed``."""
+        return self._begin(
+            tracks,
+            language,
+            capture_factory=None,
+            source_name="Live-сессия (браузер)",
+            capture_mode="browser",
+        )
+
+    def _begin(
+        self,
+        tracks: list[str] | None,
+        language: str | None,
+        *,
+        capture_factory: CaptureFactory | None,
+        source_name: str,
+        capture_mode: str | None,
+    ) -> _LiveSession:
+        """Create and start a session (shared by server-side and browser capture)."""
         with self._lock:
             if self._session is not None:
                 raise RuntimeError("live-сессия уже идёт")
@@ -128,17 +158,20 @@ class LiveManager:
                 raise RuntimeError(f"недопустимые источники: {', '.join(invalid) or 'пусто'}")
             job = Job(
                 kind="live",
-                source_name="Live-сессия",
+                source_name=source_name,
                 status=JobStatus.RUNNING,
                 started_at=time.time(),
                 language=language or self._settings.language_or_none(),
             )
             job.meta["engine"] = f"whisper:{self._settings.live_model}"
             job.meta["tracks"] = list(selected)
-            try:
-                job.meta["devices"] = capture_module.describe_devices()
-            except Exception:  # noqa: BLE001 — device info is best-effort metadata
-                log.debug("не удалось получить имена устройств", exc_info=True)
+            if capture_mode is not None:
+                job.meta["capture"] = capture_mode
+            else:
+                try:
+                    job.meta["devices"] = capture_module.describe_devices()
+                except Exception:  # noqa: BLE001 — device info is best-effort metadata
+                    log.debug("не удалось получить имена устройств", exc_info=True)
             self._repo.save(job)
             session = _LiveSession(
                 job=job,
@@ -146,7 +179,7 @@ class LiveManager:
                 repo=self._repo,
                 bus=self._bus,
                 transcriber_factory=self._transcriber_factory,
-                capture_factory=self._capture_factory,
+                capture_factory=capture_factory,
                 tracks=selected,
             )
             self._session = session
@@ -158,7 +191,7 @@ class LiveManager:
             session.abort(str(exc))
             raise
         log.info("live-сессия %s запущена (%s)", job.id, ", ".join(selected))
-        return job
+        return session
 
     def stop(self) -> Job | None:
         """Stop the active session and finalize it; None when idle."""
@@ -190,7 +223,7 @@ class _LiveSession:
         repo: JobRepository,
         bus: EventBus,
         transcriber_factory: TranscriberFactory,
-        capture_factory: CaptureFactory,
+        capture_factory: CaptureFactory | None,
         tracks: tuple[str, ...],
     ) -> None:
         self.job = job
@@ -234,18 +267,20 @@ class _LiveSession:
                 step_sec=self._settings.live_step_sec,
                 max_window_sec=self._settings.live_max_window_sec,
             )
-        try:
-            for track in self.tracks:
-                source = self._capture_factory(
-                    track, self._on_chunk, chunk_sec=self._settings.live_chunk_sec
-                )
-                source.start()
-                self._sources.append(source)
-        except Exception:
-            self._close_writers()
-            for source in self._sources:
-                source.stop()
-            raise
+        capture_factory = self._capture_factory
+        if capture_factory is not None:
+            try:
+                for track in self.tracks:
+                    source = capture_factory(
+                        track, self._on_chunk, chunk_sec=self._settings.live_chunk_sec
+                    )
+                    source.start()
+                    self._sources.append(source)
+            except Exception:
+                self._close_writers()
+                for source in self._sources:
+                    source.stop()
+                raise
         self._repo.save(self.job)
         self._bus.publish(
             self.job.id,
@@ -255,6 +290,12 @@ class _LiveSession:
             target=self._pump_loop, name=f"stenograph-live-{self.job.id}", daemon=True
         )
         self._worker.start()
+
+    def feed(self, track: str, audio: np.ndarray) -> None:
+        """Accept externally captured audio (browser upload); unknown tracks are ignored."""
+        if track not in self._trackers:
+            return
+        self._on_chunk(track, audio)
 
     def stop(self) -> None:
         """Signal capture to stop, flush the trackers and finalize."""
