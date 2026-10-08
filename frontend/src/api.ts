@@ -71,5 +71,9 @@ export const api = {
     if (language) form.append("language", language);
     return request<Job>("/api/live/start", { method: "POST", body: form });
   },
-  liveStop: (): Promise<Job> => request<Job>("/api/live/stop", { method: "POST" }),
+  liveStop: (jobId?: string): Promise<Job> => {
+    const form = new FormData();
+    if (jobId) form.append("job_id", jobId);
+    return request<Job>("/api/live/stop", { method: "POST", body: form });
+  },
 };

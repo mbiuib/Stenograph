@@ -35,6 +35,7 @@ export function JobDetailPage() {
   const { data: appConfig } = usePolling(() => api.config(), 120000);
   const [reprocessBusy, setReprocessBusy] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   const [analysisText, setAnalysisText] = useState<Partial<Record<AnalysisKind, string>>>({});
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -152,6 +153,17 @@ export function JobDetailPage() {
   };
 
   const cancel = () => void api.cancelJob(job.id).catch(() => {});
+  const stopLive = async () => {
+    setStopping(true);
+    setReprocessError(null);
+    try {
+      await api.liveStop(job.id);
+    } catch (err) {
+      setReprocessError(`Не удалось остановить запись: ${(err as Error).message}`);
+    } finally {
+      setStopping(false);
+    }
+  };
   const remove = async () => {
     if (!window.confirm(`Удалить задачу «${job.source_name}»?`)) return;
     await api.deleteJob(job.id).catch(() => {});
@@ -224,13 +236,28 @@ export function JobDetailPage() {
               {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
             </button>
           )}
-          {live && (
+          {live && job.kind === "live" && (
+            <button
+              onClick={() => void stopLive()}
+              disabled={stopping}
+              className="flex items-center gap-2 rounded-lg border border-warn/40 px-3 py-2 text-sm text-warn hover:bg-warn/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconX className="size-4" />
+              {stopping ? "Останавливаем…" : "Остановить запись"}
+            </button>
+          )}
+          {live && job.kind !== "live" && job.kind !== "jitsi" && (
             <button
               onClick={cancel}
               className="flex items-center gap-2 rounded-lg border border-warn/40 px-3 py-2 text-sm text-warn hover:bg-warn/10"
             >
               <IconX className="size-4" /> Отменить
             </button>
+          )}
+          {live && job.kind === "jitsi" && (
+            <span className="flex items-center rounded-lg border border-edge px-3 py-2 text-xs text-muted">
+              запись идёт через Jitsi — остановится с встречей
+            </span>
           )}
           {!live && (
             <button

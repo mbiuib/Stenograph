@@ -263,7 +263,8 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
   socket.onerror = () => {
     /* onclose follows */
   };
-  socket.onclose = () => notifyClosed("соединение с сервером закрыто");
+  socket.onclose = (event) =>
+    notifyClosed(event.wasClean ? "запись остановлена" : "соединение с сервером потеряно");
 
   const stop = async () => {
     if (stopped) return;

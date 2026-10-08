@@ -7,7 +7,9 @@ from pathlib import Path
 from time import monotonic, sleep
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from fakes import FakeCaptureSource, FakeEngine, PositionTranscriber, encoded_chunk
 from stenograph.api.app import create_app
@@ -24,6 +26,12 @@ TRACK_SYSTEM = 1
 def _frame(track: int, index: int) -> bytes:
     """One upload frame: track byte + int16 LE position-encoded chunk."""
     pcm = (np.clip(encoded_chunk(index), -1.0, 1.0) * 32767.0).astype("<i2")
+    return bytes([track]) + pcm.tobytes()
+
+
+def _silence_frame(track: int, seconds: float = 0.25) -> bytes:
+    """One upload frame carrying digital silence (below the RMS gate)."""
+    pcm = np.zeros(int(seconds * 16000), dtype="<i2")
     return bytes([track]) + pcm.tobytes()
 
 
@@ -308,6 +316,61 @@ def test_web_live_browser_and_server_sessions_coexist(tmp_path: Path) -> None:
     assert stopped.status_code == 200
     assert stopped.json()["id"] == server_id
     assert stopped.json()["status"] == "done"
+
+
+def test_web_live_rest_stop_closes_the_upload_socket(tmp_path: Path) -> None:
+    """Stopping a browser session from another page closes its websocket.
+
+    The recording page must learn the session ended (clean close) instead of
+    streaming into a finished session.
+    """
+    service, live, _ = _make_stack(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service, live=live))
+
+    with client.websocket_connect("/ws/live") as ws:
+        ws.send_json({"type": "start", "tracks": ["mic"]})
+        job_id = ws.receive_json()["job_id"]
+        _stream(ws, TRACK_MIC, 0, 4)
+
+        stopped = client.post("/api/live/stop", data={"job_id": job_id})
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "done", stopped.json()
+
+        # server closes the upload socket once the session is finalized
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+    assert _wait_done(client, job_id)["status"] == "done"
+    assert client.get("/api/live/status").json()["sessions"] == []
+
+
+def test_web_live_stop_finalizes_after_a_silent_tail(tmp_path: Path) -> None:
+    """Stopping with a short silent tail must not hang.
+
+    A silent window inside the tracker cannot be drained by inference (RMS
+    gate) and is too short for the silence drop: the queue must flush it and
+    complete the job instead of waiting for the lag to reach zero forever.
+    """
+    service, live, _ = _make_stack(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service, live=live))
+
+    with client.websocket_connect("/ws/live") as ws:
+        ws.send_json({"type": "start", "tracks": ["mic"]})
+        job_id = ws.receive_json()["job_id"]
+        _stream(ws, TRACK_MIC, 0, 4)  # speech: the session starts transcribing
+        sleep(0.6)  # let the queue drain it up to the live edge
+        for _ in range(5):  # ~1.25 s of silence, below the 2 s drop threshold
+            ws.send_bytes(_silence_frame(TRACK_MIC))
+            sleep(0.15)
+
+        status = client.get("/api/live/status").json()
+        lag = next(item["lag_sec"] for item in status["sessions"] if item["job_id"] == job_id)
+        assert lag > 0, f"the silent tail must sit in the undrainable zone (lag={lag})"
+
+        ws.send_json({"type": "stop"})
+
+    job = _wait_done(client, job_id, timeout=10.0)
+    assert job["status"] == "done", job
 
 
 def test_web_live_requires_start_first(tmp_path: Path) -> None:

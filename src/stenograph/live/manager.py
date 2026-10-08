@@ -201,6 +201,11 @@ class LiveManager:
             return None
         return self.stop_session(session_id)
 
+    def has_session(self, job_id: str) -> bool:
+        """True while the session with this id is registered (used by socket watches)."""
+        with self._lock:
+            return job_id in self._sessions
+
     def stop_session(self, job_id: str) -> Job | None:
         """Stop one session (browser or server) and wait (bounded) for finalization.
 
@@ -508,8 +513,14 @@ class _LiveSession:
         if self._finalized:
             return False
         self._feed_pending()
+        lag_before = self._total_lag()
         self._tick_budget(max_ticks=max_ticks, max_sec=max_sec)
-        if self._stop_requested.is_set() and not self._has_ready():
+        lag_after = self._total_lag()
+        if self._stop_requested.is_set() and (lag_after == 0.0 or lag_after >= lag_before):
+            # Nothing left, or the turn made no progress: a silent tail inside
+            # the window cannot be drained by inference (the RMS gate skips it,
+            # and it is too short to trigger the silence drop) — flushing
+            # handles it safely instead of waiting forever.
             self._finalize()
             return False
         return self.needs_turn()
@@ -558,25 +569,36 @@ class _LiveSession:
                 tracker.feed(chunk)
 
     def _tick_budget(self, *, max_ticks: int, max_sec: float) -> None:
-        """Run up to ``max_ticks`` inferences over ready tracks (wall-time bounded)."""
+        """Run up to ``max_ticks`` inferences over ready tracks (wall-time bounded).
+
+        Stops early when a full pass made no progress — a silent tail inside
+        the window cannot be drained by inference, and spinning on it would
+        starve the rest of the queue.
+        """
         deadline = time.monotonic() + max_sec
         ticks = 0
         while ticks < max_ticks and time.monotonic() < deadline:
-            ran = False
+            progressed = False
             for tracker in self._trackers.values():
                 if not tracker.ready():
                     continue
+                before = tracker.lag_seconds
                 tracker.tick()
                 ticks += 1
-                ran = True
+                if tracker.lag_seconds < before:
+                    progressed = True
                 if ticks >= max_ticks:
                     break
-            if not ran:
+            if not progressed:
                 break
 
     def _has_ready(self) -> bool:
         """True when any track has a full step of new audio awaiting inference."""
         return any(tracker.ready() for tracker in self._trackers.values())
+
+    def _total_lag(self) -> float:
+        """Sum of per-track lag; decreases when inference makes progress."""
+        return sum(tracker.lag_seconds for tracker in self._trackers.values())
 
     def _has_pending(self) -> bool:
         """True when captured chunks are waiting to be moved into the trackers."""

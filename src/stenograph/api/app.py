@@ -339,26 +339,35 @@ def create_app(
                     "sample_rate": 16000,
                 }
             )
-            while True:
-                message = await websocket.receive()
-                if message.get("type") == "websocket.disconnect":
-                    log.info("live: браузерная сессия %s отключилась", session.job.id)
-                    break
-                data = message.get("bytes")
-                if data is not None:
-                    parsed = parse_upload_frame(data)
-                    if parsed is not None:
-                        session.feed(*parsed)
-                    continue
-                text = message.get("text")
-                if not text:
-                    continue
-                try:
-                    command = json.loads(text)
-                except ValueError:
-                    continue
-                if command.get("type") == "stop":
-                    break
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_watch_live_session, websocket, live, session.job.id)
+                while True:
+                    message = await websocket.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        log.info("live: браузерная сессия %s отключилась", session.job.id)
+                        break
+                    data = message.get("bytes")
+                    if data is not None:
+                        parsed = parse_upload_frame(data)
+                        if parsed is not None:
+                            session.feed(*parsed)
+                        continue
+                    text = message.get("text")
+                    if not text:
+                        continue
+                    try:
+                        command = json.loads(text)
+                    except ValueError:
+                        continue
+                    if command.get("type") == "stop":
+                        break
+                # Finalize INSIDE the group. The watcher ends when the session
+                # disappears, and anyio does NOT cancel children on a normal
+                # body exit — stopping the session only in `finally` would
+                # deadlock: group waits for the watcher, the watcher waits for
+                # the session, the session waits for the `finally`.
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(live.stop_session, session.job.id)
         except RuntimeError as exc:
             log.warning("live: не удалось начать браузерную сессию: %s", exc)
             try:
@@ -367,7 +376,12 @@ def create_app(
                 log.debug("live: не удалось отправить ошибку клиенту", exc_info=True)
         finally:
             if session is not None:
-                await anyio.to_thread.run_sync(live.stop_session, session.job.id)
+                # Cancellation path (tab/page gone): the shielded stop above was
+                # skipped, so stop again — anyio's thread runner bails at its
+                # first checkpoint when the task is already cancelled, hence the
+                # shield; a second stop on a finished session is a no-op.
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(live.stop_session, session.job.id)
                 log.info("live: браузерная сессия %s закрыта", session.job.id)
             with contextlib.suppress(Exception):  # closing a dead socket is fine
                 await websocket.close()
@@ -432,6 +446,19 @@ def create_app(
 def _sse(payload: dict) -> str:
     """Format one server-sent event frame."""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _watch_live_session(websocket: WebSocket, live: LiveManager, job_id: str) -> None:
+    """Close the upload socket once the session is finalized on the server side.
+
+    The session can be stopped from another page (job page / another tab): the
+    recording page must learn about it instead of streaming into a finished
+    session — it gets a clean close and shows the "session finished" state.
+    """
+    while await anyio.to_thread.run_sync(live.has_session, job_id):
+        await anyio.sleep(0.5)
+    with contextlib.suppress(Exception):  # noqa: BLE001 — the client may be gone
+        await websocket.close()
 
 
 async def _caption_sender(websocket: WebSocket, session: MeetingSession) -> None:

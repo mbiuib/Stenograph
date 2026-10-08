@@ -1,11 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { IconMic } from "../components/Icons";
 import { Card, EmptyState, ErrorBanner } from "../components/ui";
 import { fmtClock, fmtTimestamp, speakerColor } from "../format";
 import { useJobStream, useNow, usePolling } from "../hooks";
-import { startLiveCapture, type LiveCapture, type LiveTrack } from "../live/capture";
+import type { LiveTrack } from "../live/capture";
+import {
+  clearFinishedLiveSession,
+  getLiveSession,
+  startLiveSession,
+  stopLiveSession,
+  subscribeLiveSession,
+} from "../live/session";
 import type { Job, LiveSessionInfo } from "../types";
 
 const LIVE_SPEAKERS = ["Они", "Вы"];
@@ -21,12 +28,13 @@ export function LivePage() {
   const [language, setLanguage] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
-  const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [levels, setLevels] = useState<Record<string, number>>({ mic: 0, system: 0 });
   const [reprocessBusy, setReprocessBusy] = useState(false);
-  const captureRef = useRef<LiveCapture | null>(null);
+  // Запись живёт в модульном сторе: переживает переходы по вкладкам сервиса.
+  const session = useSyncExternalStore(subscribeLiveSession, getLiveSession);
+  const active = session.active;
+  const activeJobId = active?.jobId ?? null;
+  const lastJobId = session.lastJobId;
+  const levels = active?.levels ?? { mic: 0, system: 0 };
 
   const { data: status } = usePolling(() => api.liveStatus(), 3000);
   const { data: engines } = usePolling(() => api.engines(), 60000);
@@ -65,27 +73,8 @@ export function LivePage() {
     }
     setBusy(true);
     setActionError(null);
-    setLastJobId(null);
     try {
-      const capture = await startLiveCapture({
-        tracks,
-        language: language || null,
-        onLevel: (track, rms) => setLevels((prev) => ({ ...prev, [track]: rms })),
-        onClosed: (reason) => {
-          if (captureRef.current) {
-            captureRef.current = null;
-            setLevels({ mic: 0, system: 0 });
-            setActiveJobId((current) => {
-              if (current) setLastJobId(current);
-              return null;
-            });
-            setActionError(`Сессия завершена: ${reason}`);
-          }
-        },
-      });
-      captureRef.current = capture;
-      setStartedAt(Date.now() / 1000);
-      setActiveJobId(capture.jobId);
+      await startLiveSession({ tracks, language: language || null });
     } catch (err) {
       setActionError(`Не удалось начать запись: ${(err as Error).message}`);
     } finally {
@@ -94,24 +83,23 @@ export function LivePage() {
   };
 
   const stop = async () => {
-    const capture = captureRef.current;
-    if (!capture) return;
+    if (!active) return;
     setBusy(true);
     setActionError(null);
     try {
-      await capture.stop();
+      await stopLiveSession();
     } catch {
       /* сервер завершит сессию сам */
     } finally {
-      captureRef.current = null;
-      setLevels({ mic: 0, system: 0 });
-      setLastJobId(capture.jobId);
-      setActiveJobId(null);
       setBusy(false);
     }
   };
 
-  const errors = [actionError, stream.error].filter(Boolean);
+  const errors = [
+    actionError,
+    session.closedReason ? `Сессия завершена: ${session.closedReason}` : null,
+    stream.error,
+  ].filter(Boolean);
 
   return (
     <div className="flex flex-col gap-5">
@@ -144,7 +132,7 @@ export function LivePage() {
         <ActiveSession
           job={stream.job}
           session={mySession}
-          startedAt={startedAt}
+          startedAt={active?.startedAt ?? null}
           stream={stream}
           levels={levels}
           now={now}
@@ -190,6 +178,12 @@ export function LivePage() {
             >
               Открыть черновой транскрипт
             </Link>
+            <button
+              onClick={() => clearFinishedLiveSession()}
+              className="rounded-lg bg-gradient-to-r from-accent2 to-accent px-4 py-2 text-sm font-medium text-bg hover:opacity-90"
+            >
+              Начать новую запись
+            </button>
           </div>
         </Card>
       ) : (
@@ -317,6 +311,8 @@ function StartPanel({
           очередь сервера: при нескольких записях очередь достаётся каждой по кругу, поэтому
           чужой текст может появиться раньше вашего, а ваша запись ничего не теряет — она
           просто догоняет следом. Задержка и позиция в очереди видны над транскриптом.
+          Запись продолжается, даже если вы уйдёте на другие страницы сервиса (Задачи,
+          Дашборд) — вернитесь на Live, чтобы следить за ней и остановить.
         </p>
         <p>
           Спикеры разделяются по источникам: собеседники из созвона («Они») и ваш микрофон
