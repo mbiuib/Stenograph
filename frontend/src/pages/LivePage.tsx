@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { IconMic } from "../components/Icons";
-import { Card, EmptyState, ErrorBanner } from "../components/ui";
-import { fmtClock, fmtTimestamp, speakerColor } from "../format";
+import { Card, EmptyState, ErrorBanner, StatusBadge } from "../components/ui";
+import { fmtClock, fmtDateTime, fmtTimestamp, speakerColor } from "../format";
 import { useJobStream, useNow, usePolling } from "../hooks";
 import type { LiveTrack } from "../live/capture";
 import {
@@ -30,6 +30,7 @@ export function LivePage() {
   const [mic, setMic] = useState(true);
   const [system, setSystem] = useState(CAN_SHARE_SYSTEM);
   const [language, setLanguage] = useState("");
+  const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [reprocessBusy, setReprocessBusy] = useState(false);
@@ -49,6 +50,10 @@ export function LivePage() {
     () => (lastJobId ? api.getJob(lastJobId) : Promise.resolve(null)),
     3000,
   );
+  const { data: recentJobs } = usePolling(() => api.listJobs(undefined, 50), 10000);
+  const recentLive = (recentJobs ?? [])
+    .filter((job) => job.kind === "live" || job.kind === "jitsi")
+    .slice(0, 5);
 
   const mySession = status?.sessions.find((item) => item.job_id === activeJobId) ?? null;
   const otherSessions = (status?.sessions ?? []).filter((item) => item.job_id !== activeJobId);
@@ -78,7 +83,7 @@ export function LivePage() {
     setBusy(true);
     setActionError(null);
     try {
-      await startLiveSession({ tracks, language: language || null });
+      await startLiveSession({ tracks, language: language || null, title: title.trim() || null });
     } catch (err) {
       setActionError(`Не удалось начать запись: ${(err as Error).message}`);
     } finally {
@@ -203,7 +208,29 @@ export function LivePage() {
           insecure={insecure}
           othersRecording={otherSessions.length}
           systemSupported={CAN_SHARE_SYSTEM}
+          title={title}
+          onTitle={setTitle}
         />
+      )}
+
+      {recentLive.length > 0 && (
+        <Card title="Последние записи" bodyClassName="p-0">
+          <ul className="divide-y divide-edge/60">
+            {recentLive.map((job) => (
+              <li key={job.id} className="flex items-center gap-3 px-4 py-3">
+                <Link to={`/jobs/${job.id}`} className="min-w-0 flex-1 hover:text-accent">
+                  <span className="block truncate text-sm">{job.source_name}</span>
+                  <span className="block text-xs text-muted">
+                    {fmtDateTime(job.created_at)}
+                    {job.meta.duration ? ` · ${fmtClock(Number(job.meta.duration))}` : ""}
+                    {job.kind === "jitsi" ? " · Jitsi" : ""}
+                  </span>
+                </Link>
+                <StatusBadge status={job.status} />
+              </li>
+            ))}
+          </ul>
+        </Card>
       )}
     </div>
   );
@@ -221,6 +248,8 @@ function StartPanel({
   insecure,
   othersRecording,
   systemSupported,
+  title,
+  onTitle,
 }: {
   mic: boolean;
   system: boolean;
@@ -233,6 +262,8 @@ function StartPanel({
   insecure: boolean;
   othersRecording: number;
   systemSupported: boolean;
+  title: string;
+  onTitle: (value: string) => void;
 }) {
   const sources = [
     {
@@ -293,6 +324,19 @@ function StartPanel({
               </option>
             ))}
           </select>
+        </label>
+        <label className="flex flex-col gap-1.5 rounded-lg border border-edge p-3">
+          <span className="text-sm font-medium">Название встречи</span>
+          <input
+            value={title}
+            onChange={(event) => onTitle(event.target.value)}
+            placeholder="Например: Планёрка команды"
+            maxLength={200}
+            className="rounded-lg border border-edge bg-surface px-3 py-1.5 text-sm outline-none placeholder:text-muted/60 focus:border-accent/50"
+          />
+          <span className="text-xs text-muted">
+            Необязательно — если оставить пустым, имя получит дату и время.
+          </span>
         </label>
         {insecure && (
           <div className="rounded-lg border border-warn/40 p-3 text-xs text-warn">

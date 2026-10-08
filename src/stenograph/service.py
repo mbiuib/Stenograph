@@ -146,6 +146,35 @@ class TranscriptionService:
         new_job.meta["retry_of"] = job.id
         return self._enqueue(new_job)
 
+    def update_job(
+        self,
+        job: Job,
+        *,
+        source_name: str | None = None,
+        speaker_names: dict[str, str] | None = None,
+    ) -> Job:
+        """Rename a job and/or map diarized speaker labels to human names."""
+        if source_name is not None:
+            cleaned = source_name.strip()
+            if not cleaned:
+                raise ValueError("имя задачи не может быть пустым")
+            if len(cleaned) > 200:
+                raise ValueError("имя задачи слишком длинное (максимум 200 символов)")
+            job.source_name = cleaned
+        if speaker_names is not None:
+            mapping = {
+                str(key).strip(): str(value).strip()
+                for key, value in speaker_names.items()
+                if str(key).strip() and str(value).strip()
+            }
+            if mapping:
+                job.meta["speaker_names"] = mapping
+            else:
+                job.meta.pop("speaker_names", None)
+        self.repo.save(job)
+        self.bus.publish(job.id, {"type": "meta", "meta": job.meta})
+        return job
+
     def request_analysis(self, job: Job, analysis_type: str) -> Job:
         """Queue protocol/summary generation for a finished job.
 

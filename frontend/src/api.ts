@@ -48,6 +48,16 @@ export const api = {
   retryJob: (id: string): Promise<Job> =>
     request<Job>(`/api/jobs/${id}/retry`, { method: "POST" }),
 
+  updateJob: (
+    id: string,
+    payload: { source_name?: string; speaker_names?: Record<string, string> },
+  ): Promise<Job> =>
+    request<Job>(`/api/jobs/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+
   analyzeJob: (id: string, type: AnalysisKind): Promise<Job> => {
     const form = new FormData();
     form.append("type", type);

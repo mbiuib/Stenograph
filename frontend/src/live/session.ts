@@ -50,12 +50,14 @@ export function getLiveSession(): LiveSessionSnapshot {
 export async function startLiveSession(options: {
   tracks: LiveTrack[];
   language?: string | null;
+  title?: string | null;
 }): Promise<ActiveLiveSession> {
   if (capture) throw new Error("запись уже идёт");
 
   const started = await startLiveCapture({
     tracks: options.tracks,
     language: options.language,
+    title: options.title,
     onLevel: (track, rms) => {
       const active = snapshot.active;
       if (!active) return;

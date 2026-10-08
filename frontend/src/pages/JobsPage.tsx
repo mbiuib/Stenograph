@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { IconOpen, IconTrash, IconX } from "../components/Icons";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
-import { fmtClock, fmtRelative } from "../format";
+import { fmtClock, fmtDateTime } from "../format";
 import { usePolling } from "../hooks";
 import type { Job } from "../types";
 
@@ -16,15 +16,44 @@ const TABS = [
   { key: "cancelled", label: "Отменённые" },
 ];
 
+const KIND_LABELS: Record<string, string> = {
+  file: "Файл",
+  live: "Live",
+  jitsi: "Jitsi",
+  reprocess: "Улучшение",
+  analysis: "Анализ",
+};
+
+const KINDS = [
+  { key: "", label: "Все типы" },
+  { key: "file", label: "Файлы" },
+  { key: "live", label: "Live" },
+  { key: "jitsi", label: "Jitsi" },
+  { key: "reprocess", label: "Улучшения" },
+  { key: "analysis", label: "Анализы" },
+];
+
 export function JobsPage() {
   const [tab, setTab] = useState("");
+  const [kind, setKind] = useState("");
   const [query, setQuery] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
   const { data: jobs, error } = usePolling(() => api.listJobs(tab || undefined, 200), 3000);
   const navigate = useNavigate();
 
-  const filtered = (jobs ?? []).filter((job) =>
-    job.source_name.toLowerCase().includes(query.trim().toLowerCase()),
+  const filtered = (jobs ?? []).filter(
+    (job) =>
+      (!kind || job.kind === kind) &&
+      job.source_name.toLowerCase().includes(query.trim().toLowerCase()),
   );
+
+  const commitRename = async (job: Job) => {
+    const value = editValue.trim();
+    setEditingId(null);
+    if (!value || value === job.source_name) return;
+    await api.updateJob(job.id, { source_name: value }).catch(() => {});
+  };
 
   const onCancel = (id: string) => void api.cancelJob(id).catch(() => {});
   const onDelete = async (job: Job) => {
@@ -71,6 +100,23 @@ export function JobsPage() {
         />
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted">Тип:</span>
+        {KINDS.map((item) => (
+          <button
+            key={item.key}
+            onClick={() => setKind(item.key)}
+            className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
+              kind === item.key
+                ? "border-accent/50 bg-surface2 text-ink"
+                : "border-edge text-muted hover:text-ink"
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
       <Card bodyClassName="p-0">
         {filtered.length === 0 ? (
           <EmptyState title="Ничего не найдено" hint="Измените фильтр или загрузите файл." />
@@ -81,15 +127,44 @@ export function JobsPage() {
                 key={job.id}
                 className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 hover:bg-surface2/40"
               >
-                <button
-                  className="min-w-0 flex-1 basis-52 text-left"
+                <div
+                  className="min-w-0 flex-1 basis-52 cursor-pointer text-left"
                   onClick={() => navigate(`/jobs/${job.id}`)}
+                  title={`ID: ${job.id}`}
                 >
-                  <span className="block truncate text-sm font-medium">{job.source_name}</span>
+                  {editingId === job.id ? (
+                    <input
+                      autoFocus
+                      value={editValue}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => setEditValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void commitRename(job);
+                        if (event.key === "Escape") {
+                          setEditValue(job.source_name);
+                          setEditingId(null);
+                        }
+                      }}
+                      onBlur={() => void commitRename(job)}
+                      className="w-full rounded-md border border-edge bg-surface px-2 py-0.5 text-sm outline-none focus:border-accent/50"
+                    />
+                  ) : (
+                    <span
+                      className="block truncate text-sm font-medium"
+                      title="Двойной клик — переименовать"
+                      onDoubleClick={(event) => {
+                        event.stopPropagation();
+                        setEditValue(job.source_name);
+                        setEditingId(job.id);
+                      }}
+                    >
+                      {job.source_name}
+                    </span>
+                  )}
                   <span className="text-xs text-muted">
-                    {job.id} · {fmtRelative(job.created_at)}
+                    {KIND_LABELS[job.kind] ?? job.kind} · {fmtDateTime(job.created_at)}
                   </span>
-                </button>
+                </div>
                 <div className="w-28">
                   {job.status === "running" ? (
                     <div className="flex flex-col gap-1">

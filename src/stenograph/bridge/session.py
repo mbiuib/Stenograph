@@ -24,6 +24,7 @@ from ..config import Settings
 from ..domain.models import Job, JobStatus, Segment
 from ..events import EventBus
 from ..live.streamer import SAMPLE_RATE, StreamTracker
+from ..naming import timestamped
 from ..storage import JobRepository
 from .protocol import result_message
 
@@ -63,7 +64,7 @@ class MeetingSession:
         self.meeting_id = meeting_id
         self.job = Job(
             kind="jitsi",
-            source_name=f"Jitsi-сессия {meeting_id[:8]}",
+            source_name=timestamped("Jitsi"),
             status=JobStatus.RUNNING,
             started_at=time.time(),
         )

@@ -104,6 +104,22 @@ def test_live_session_end_to_end(tmp_path: Path) -> None:
     assert client.post("/api/live/stop").status_code == 200
 
 
+def test_live_start_accepts_meeting_title(tmp_path: Path) -> None:
+    """A custom title names the session; the default carries a date/time."""
+    service, live, _bus = _make_stack(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service, live=live))
+
+    titled = client.post("/api/live/start", data={"tracks": "system", "title": "Планёрка"})
+    assert titled.status_code == 201
+    assert titled.json()["source_name"] == "Планёрка"
+    assert client.post("/api/live/stop").status_code == 200
+
+    default = client.post("/api/live/start", data={"tracks": "system"})
+    assert default.status_code == 201
+    assert default.json()["source_name"].startswith("Live (машина) — ")
+    assert client.post("/api/live/stop").status_code == 200
+
+
 def test_live_stop_without_session(tmp_path: Path) -> None:
     """Stopping with no session returns 404."""
     service, live, _ = _make_stack(tmp_path)

@@ -58,9 +58,17 @@ export function etaSeconds(job: Job): number | null {
   return Number.isFinite(remaining) && remaining > 0 ? remaining : null;
 }
 
-export function speakerLabel(speaker: string): string {
+export function speakerLabel(speaker: string, names?: Record<string, string>): string {
+  const custom = names?.[speaker];
+  if (custom) return custom;
   const match = /(\d+)$/.exec(speaker);
   return match ? `S${Number(match[1]) + 1}` : speaker;
+}
+
+/** Human speaker names stored on the job (``meta.speaker_names``). */
+export function speakerNamesFrom(job: Job): Record<string, string> | undefined {
+  const raw: unknown = job.meta?.speaker_names;
+  return raw && typeof raw === "object" ? (raw as Record<string, string>) : undefined;
 }
 
 /** Unique speakers in order of first appearance. */
@@ -100,15 +108,19 @@ function srtTime(seconds: number): string {
 }
 
 export function toTxt(job: Job): string {
+  const names = speakerNamesFrom(job);
   return job.segments
-    .map((segment) => (segment.speaker ? `[${speakerLabel(segment.speaker)}] ${segment.text}` : segment.text))
+    .map((segment) =>
+      segment.speaker ? `[${speakerLabel(segment.speaker, names)}] ${segment.text}` : segment.text,
+    )
     .join("\n");
 }
 
 export function toSrt(job: Job): string {
+  const names = speakerNamesFrom(job);
   return job.segments
     .map((segment, index) => {
-      const prefix = segment.speaker ? `${speakerLabel(segment.speaker)}: ` : "";
+      const prefix = segment.speaker ? `${speakerLabel(segment.speaker, names)}: ` : "";
       return `${index + 1}\n${srtTime(segment.start)} --> ${srtTime(segment.end)}\n${prefix}${segment.text}\n`;
     })
     .join("\n");

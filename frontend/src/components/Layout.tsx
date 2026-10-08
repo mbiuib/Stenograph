@@ -1,7 +1,18 @@
+import { useSyncExternalStore } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
+import { useNow } from "../hooks";
+import { getLiveSession, subscribeLiveSession } from "../live/session";
 import { IconDashboard, IconJobs, IconMic, IconPlus } from "./Icons";
 
 export function Layout() {
+  const live = useSyncExternalStore(subscribeLiveSession, getLiveSession);
+  const now = useNow(1000);
+  const recordSeconds = live.active
+    ? Math.max(0, Math.floor(now / 1000 - live.active.startedAt))
+    : 0;
+  const recordClock = `${String(Math.floor(recordSeconds / 60)).padStart(2, "0")}:${String(
+    recordSeconds % 60,
+  ).padStart(2, "0")}`;
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
       isActive ? "bg-surface2 text-ink" : "text-muted hover:bg-surface2/60 hover:text-ink"
@@ -33,6 +44,20 @@ export function Layout() {
             <IconMic className="size-5 shrink-0" />
             <span className="hidden md:block">Live</span>
           </NavLink>
+          {live.active && (
+            <Link
+              to="/live"
+              title="Идёт запись — открыть Live"
+              className="mt-1 flex items-center gap-3 rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err"
+            >
+              <span className="relative flex size-5 shrink-0 items-center justify-center">
+                <span className="absolute inline-flex size-2.5 animate-ping rounded-full bg-err opacity-60" />
+                <span className="relative inline-flex size-2.5 rounded-full bg-err" />
+              </span>
+              <span className="hidden flex-1 md:block">Идёт запись</span>
+              <span className="tabular hidden md:block">{recordClock}</span>
+            </Link>
+          )}
         </nav>
         <div className="mt-auto hidden px-1 text-xs text-muted md:block">
           <a className="hover:text-ink" href="/docs" target="_blank" rel="noreferrer">

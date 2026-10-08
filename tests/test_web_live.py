@@ -90,6 +90,25 @@ def _wait_until(condition, timeout: float = 15.0, pause: float = 0.1) -> bool:
     return condition()
 
 
+def test_web_live_ws_title_names_the_job(tmp_path: Path) -> None:
+    """The start-frame title becomes the session name; the default is timestamped."""
+    service, live, _bus = _make_stack(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service, live=live))
+
+    with client.websocket_connect("/ws/live") as ws:
+        ws.send_json({"type": "start", "tracks": ["mic"], "title": "Созвон команды"})
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        titled_job = service.get(ready["job_id"])
+        assert titled_job is not None and titled_job.source_name == "Созвон команды"
+
+    with client.websocket_connect("/ws/live") as ws:
+        ws.send_json({"type": "start", "tracks": ["mic"]})
+        ready = ws.receive_json()
+        default_job = service.get(ready["job_id"])
+        assert default_job is not None and default_job.source_name.startswith("Live — ")
+
+
 def test_web_live_upload_end_to_end(tmp_path: Path) -> None:
     """WS handshake → binary frames per track → stop → finalized done job."""
     service, live, bus = _make_stack(tmp_path)

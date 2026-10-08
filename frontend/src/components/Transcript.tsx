@@ -6,10 +6,12 @@ export function Transcript({
   segments,
   speakers,
   live,
+  speakerNames,
 }: {
   segments: Segment[];
   speakers: string[];
   live: boolean;
+  speakerNames?: Record<string, string>;
 }) {
   const scroller = useRef<HTMLDivElement | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -59,7 +61,7 @@ export function Transcript({
                   style={{ borderColor: color, color }}
                   title={segment.speaker}
                 >
-                  {speakerLabel(segment.speaker)}
+                  {speakerLabel(segment.speaker, speakerNames)}
                 </span>
               )}
               <p className="min-w-0 text-sm leading-relaxed">{segment.text}</p>

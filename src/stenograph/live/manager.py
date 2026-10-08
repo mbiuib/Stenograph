@@ -30,6 +30,7 @@ import numpy as np
 from ..config import Settings
 from ..domain.models import Job, JobStatus, Segment
 from ..events import EventBus
+from ..naming import timestamped
 from ..storage import JobRepository
 from . import capture as capture_module
 from .streamer import SAMPLE_RATE, StreamTracker, WindowTranscriber, WindowWord
@@ -158,7 +159,12 @@ class LiveManager:
             "serving": serving,
         }
 
-    def start(self, tracks: list[str] | None = None, language: str | None = None) -> Job:
+    def start(
+        self,
+        tracks: list[str] | None = None,
+        language: str | None = None,
+        title: str | None = None,
+    ) -> Job:
         """Start a server-side capture session; one at a time (this machine's devices).
 
         Raises RuntimeError when a server-side capture session is already running.
@@ -170,14 +176,17 @@ class LiveManager:
             tracks,
             language,
             capture_factory=self._capture_factory,
-            source_name="Live-сессия",
+            source_name=(title or "").strip() or timestamped("Live (машина)"),
             capture_mode=None,
             server=True,
         )
         return session.job
 
     def start_web(
-        self, tracks: list[str] | None = None, language: str | None = None
+        self,
+        tracks: list[str] | None = None,
+        language: str | None = None,
+        title: str | None = None,
     ) -> _LiveSession:
         """Start a browser-upload session; audio arrives via ``session.feed``.
 
@@ -188,7 +197,7 @@ class LiveManager:
             tracks,
             language,
             capture_factory=None,
-            source_name="Live-сессия (браузер)",
+            source_name=(title or "").strip() or timestamped("Live"),
             capture_mode="browser",
             server=False,
         )

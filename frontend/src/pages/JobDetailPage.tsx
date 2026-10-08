@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
-import { IconCopy, IconDownload, IconRefresh, IconTrash, IconX } from "../components/Icons";
+import { IconCopy, IconDownload, IconPencil, IconRefresh, IconTrash, IconX } from "../components/Icons";
 import { Markdown } from "../components/Markdown";
 import { Transcript } from "../components/Transcript";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
@@ -37,6 +37,12 @@ export function JobDetailPage() {
   const [reprocessError, setReprocessError] = useState<string | null>(null);
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [nameValue, setNameValue] = useState("");
+  const [nameOverride, setNameOverride] = useState<string | null>(null);
+  const [namesOverride, setNamesOverride] = useState<Record<string, string> | null>(null);
+  const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+  const [speakerValue, setSpeakerValue] = useState("");
   const [stopping, setStopping] = useState(false);
 
   const [analysisText, setAnalysisText] = useState<Partial<Record<AnalysisKind, string>>>({});
@@ -132,6 +138,8 @@ export function JobDetailPage() {
   };
 
   const speakers = useMemo(() => speakerOrder(segments), [segments]);
+  const speakerNames =
+    namesOverride ?? ((job?.meta.speaker_names as Record<string, string> | undefined) ?? {});
 
   if (loading && !job) {
     return <p className="py-16 text-center text-sm text-muted">Загрузка…</p>;
@@ -193,6 +201,31 @@ export function JobDetailPage() {
       setRetryBusy(false);
     }
   };
+  const saveName = async () => {
+    const value = nameValue.trim();
+    setRenaming(false);
+    const current = nameOverride ?? job.source_name;
+    if (!value || value === current) return;
+    try {
+      await api.updateJob(job.id, { source_name: value });
+      setNameOverride(value);
+    } catch {
+      /* имя останется прежним */
+    }
+  };
+  const saveSpeaker = async (speaker: string) => {
+    setEditingSpeaker(null);
+    const value = speakerValue.trim();
+    const next = { ...speakerNames };
+    if (value) next[speaker] = value;
+    else delete next[speaker];
+    try {
+      const updated = await api.updateJob(job.id, { speaker_names: next });
+      setNamesOverride((updated.meta.speaker_names as Record<string, string> | undefined) ?? {});
+    } catch {
+      /* маппинг останется прежним */
+    }
+  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -203,9 +236,36 @@ export function JobDetailPage() {
               ← Все задачи
             </Link>
           </p>
-          <h1 className="mt-1 truncate text-xl font-semibold">{job.source_name}</h1>
+          {renaming ? (
+            <input
+              autoFocus
+              value={nameValue}
+              onChange={(event) => setNameValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void saveName();
+                if (event.key === "Escape") setRenaming(false);
+              }}
+              onBlur={() => void saveName()}
+              className="mt-1 w-full max-w-xl rounded-lg border border-edge bg-surface px-3 py-1.5 text-xl font-semibold outline-none focus:border-accent/50"
+            />
+          ) : (
+            <h1 className="mt-1 flex items-center gap-2 text-xl font-semibold">
+              <span className="min-w-0 truncate">{nameOverride ?? job.source_name}</span>
+              <button
+                title="Переименовать"
+                onClick={() => {
+                  setNameValue(nameOverride ?? job.source_name);
+                  setRenaming(true);
+                }}
+                className="rounded-md p-1 text-muted hover:bg-surface2 hover:text-ink"
+              >
+                <IconPencil className="size-4" />
+              </button>
+            </h1>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <StatusBadge status={job.status} />
+            {job.created_at != null && <Chip>{fmtDateTime(job.created_at)}</Chip>}
             {job.meta.engine != null && <Chip>движок: {String(job.meta.engine)}</Chip>}
             {job.language && <Chip>язык: {job.language}</Chip>}
             {job.meta.duration != null && <Chip>аудио: {fmtClock(Number(job.meta.duration))}</Chip>}
@@ -440,16 +500,45 @@ export function JobDetailPage() {
       )}
 
       {speakers.length > 0 && (
-        <div className="flex flex-wrap gap-2 text-xs">
-          {speakers.map((speaker) => (
-            <span
-              key={speaker}
-              className="inline-flex items-center gap-1.5 rounded-md border border-edge bg-surface px-2 py-1"
-            >
-              <span className="size-2 rounded-full" style={{ background: speakerColor(speaker, speakers) }} />
-              {speakerLabel(speaker)}
-            </span>
-          ))}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {speakers.map((speaker) => {
+            const color = speakerColor(speaker, speakers);
+            if (editingSpeaker === speaker) {
+              return (
+                <input
+                  key={speaker}
+                  autoFocus
+                  value={speakerValue}
+                  onChange={(event) => setSpeakerValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void saveSpeaker(speaker);
+                    if (event.key === "Escape") {
+                      setSpeakerValue(speakerNames[speaker] ?? "");
+                      setEditingSpeaker(null);
+                    }
+                  }}
+                  onBlur={() => void saveSpeaker(speaker)}
+                  placeholder={speakerLabel(speaker)}
+                  className="w-36 rounded-md border border-edge bg-surface px-2 py-1 text-xs text-ink outline-none focus:border-accent/50"
+                />
+              );
+            }
+            return (
+              <button
+                key={speaker}
+                title="Переименовать спикера"
+                onClick={() => {
+                  setSpeakerValue(speakerNames[speaker] ?? "");
+                  setEditingSpeaker(speaker);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md border border-edge bg-surface px-2 py-1 hover:border-accent/50"
+              >
+                <span className="size-2 rounded-full" style={{ background: color }} />
+                {speakerLabel(speaker, speakerNames)}
+              </button>
+            );
+          })}
+          <span className="text-muted/70">клик по спикеру — дать имя</span>
         </div>
       )}
 
@@ -471,7 +560,12 @@ export function JobDetailPage() {
       ) : (
         <Card title="Транскрипт" bodyClassName="p-4">
           {segments.length > 0 ? (
-            <Transcript segments={segments} speakers={speakers} live={job.status === "running"} />
+            <Transcript
+              segments={segments}
+              speakers={speakers}
+              live={job.status === "running"}
+              speakerNames={speakerNames}
+            />
           ) : job.status === "done" && job.text ? (
             <pre className="max-h-[60vh] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
               {job.text}

@@ -27,6 +27,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .. import __version__
 from ..bridge.manager import BridgeManager
@@ -41,6 +42,13 @@ from ..live.web import parse_upload_frame
 from ..service import TranscriptionService, build_default_service
 
 log = logging.getLogger(__name__)
+
+
+class JobUpdate(BaseModel):
+    """Editable job fields (PATCH /api/jobs/{id})."""
+
+    source_name: str | None = None
+    speaker_names: dict[str, str] | None = None
 
 
 def create_app(
@@ -126,6 +134,20 @@ def create_app(
         if service.get(job_id) is None:
             raise HTTPException(status_code=404, detail="job not found")
         service.delete(job_id)
+
+    @app.patch("/api/jobs/{job_id}")
+    def update_job(job_id: str, payload: JobUpdate) -> dict:
+        """Rename a job and/or map speaker labels to human names (JSON body)."""
+        job = service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        try:
+            updated = service.update_job(
+                job, source_name=payload.source_name, speaker_names=payload.speaker_names
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return updated.model_dump()
 
     @app.post("/api/jobs/{job_id}/reprocess", status_code=201)
     def reprocess_job(job_id: str, engine: str | None = Form(default=None)) -> dict:
@@ -289,6 +311,7 @@ def create_app(
     def live_start(
         tracks: str | None = Form(default=None),
         language: str | None = Form(default=None),
+        title: str | None = Form(default=None),
     ) -> dict:
         """Start a server-side capture session; tracks is a comma-separated list.
 
@@ -297,7 +320,7 @@ def create_app(
         """
         selected = [item.strip() for item in (tracks or "").split(",") if item.strip()]
         try:
-            job = live.start(selected or None, language)
+            job = live.start(selected or None, language, title)
         except CaptureError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:  # a server session is already running / bad tracks
@@ -325,7 +348,8 @@ def create_app(
         """Browser live capture: the page uploads microphone/system audio.
 
         Handshake (text JSON): ``{"type":"start","tracks":["mic","system"],
-        "language":"ru"}``; the answer is ``{"type":"ready","job_id":…}``.
+        "language":"ru","title":"Планёрка"}``; the answer is
+        ``{"type":"ready","job_id":…}``.
         Binary frames: one track byte (0 = mic, 1 = system) + int16 LE
         16 kHz mono PCM. Any number of browser sessions can run at once; the
         shared decode queue transcribes them turn by turn. ``{"type":"stop"}``
@@ -346,7 +370,11 @@ def create_app(
             if command.get("type") != "start":
                 raise RuntimeError("первым сообщением должен быть start")
             requested = [name for name in command.get("tracks") or [] if name in ("mic", "system")]
-            session = live.start_web(requested or None, command.get("language") or None)
+            session = live.start_web(
+                requested or None,
+                command.get("language") or None,
+                command.get("title") or None,
+            )
             log.info(
                 "live: браузерная сессия %s подключена (%s)",
                 session.job.id,

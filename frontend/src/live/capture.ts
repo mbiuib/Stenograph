@@ -13,6 +13,7 @@ export type LiveTrack = "mic" | "system";
 export interface LiveCaptureOptions {
   tracks: LiveTrack[];
   language?: string | null;
+  title?: string | null;
   onLevel?: (track: LiveTrack, rms: number) => void;
   onClosed?: (reason: string) => void;
 }
@@ -179,6 +180,7 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
             type: "start",
             tracks: options.tracks,
             language: options.language || undefined,
+            title: options.title || undefined,
           }),
         );
       };
