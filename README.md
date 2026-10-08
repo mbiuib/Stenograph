@@ -27,8 +27,15 @@ loopback) и микрофона с распознаванием на лету �
 и после остановки запись автоматически уходит на улучшение точным движком (moss)
 в отдельную задачу с реальными спикерами.
 
-Дальше по плану: Jitsi-мост (streaming-whisper для Jigasi), LLM-постобработка
-(протоколы и резюме через LM Studio).
+**Milestone 4 — Jitsi-мост.** Нативный streaming-whisper эндпоинт для Jigasi
+(`WS /ws/{meeting_id}`): виртуальный участник-транскрибатор дозванивается к нам,
+аудио каждого участника приходит отдельным потоком с идентификатором, титры
+(partial/final) возвращаются в конференцию и видны в интерфейсе Jitsi; встреча
+сохраняется как задача с дорожкой каждого участника. Для Jigasi спец-сервис
+`org.jitsi.jigasi.transcription.WhisperTranscriptionService` и URL моста
+(см. «Подключение к Jitsi»).
+
+Дальше по плану: LLM-постобработка (протоколы и резюме через LM Studio).
 
 ## Быстрый старт
 
@@ -62,6 +69,34 @@ uvicorn stenograph.api.app:create_app --factory    # сервер + веб (http
 странице задачи остаётся доступной всегда; движок можно переопределить
 (например, `whisper` — быстрее, без диаризации).
 
+## Подключение к Jitsi
+
+Участник-транскрибатор — штатный Jigasi с кастомным сервисом: он подключается к
+конференции, получает аудио каждого участника отдельно (диаризация не нужна —
+говорящий известен) и стримит его в «Стенограф» по протоколу streaming-whisper;
+титры возвращаются в конференцию и показываются в UI Jitsi.
+
+На стороне Jitsi (docker-jitsi-meet, профиль `transcriber.yml`):
+
+```bash
+ENABLE_TRANSCRIPTIONS=1
+JIGASI_TRANSCRIBER_CUSTOM_SERVICE=org.jitsi.jigasi.transcription.WhisperTranscriptionService
+JIGASI_TRANSCRIBER_WHISPER_URL=ws://<адрес-стенографа>:8000/ws
+PREFERRED_LANGUAGE=ru-RU   # язык транскрибации по умолчанию
+USE_APP_LANGUAGE=0         # не подменять языком интерфейса
+```
+
+```
+docker compose -f docker-compose.yml -f transcriber.yml up -d
+```
+
+Сервер «Стенографа» должен слушать `0.0.0.0` (`start_server.bat` уже настроен) —
+Jigasi обращается к нему по LAN. В конференции: «More actions» → «Closed
+captions» → «Start closed captions». Результат — задача «Jitsi-сессия …» в вебе:
+живой транскрипт по участникам, аудио дорожек в `data/jitsi/<job>/`, экспорт
+TXT/SRT/JSON. Если язык конференции не совпадает с `PREFERRED_LANGUAGE`,
+устойчивый русский текст не получится: whisper получает язык из запроса Jitsi.
+
 ## Архитектура
 
 ```
@@ -73,6 +108,8 @@ src/stenograph/
 ├── events.py   # шина событий для SSE/WebSocket
 ├── pipeline.py # стадии обработки файловой задачи
 ├── service.py  # очередь задач, воркер, отмена
+├── live/       # live-режим: WASAPI-захват, streaming, сессии
+├── bridge/     # Jitsi-мост: протокол Jigasi, сессии встреч
 ├── api/        # FastAPI: тонкий HTTP-слой
 └── cli.py      # `stenograph transcribe`
 ```
