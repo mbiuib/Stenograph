@@ -39,6 +39,16 @@ def probe(path: Path, settings: Settings) -> dict:
         return {}
     data = json.loads(result.stdout or "{}")
     fmt = data.get("format", {})
+    if not fmt and not data.get("streams"):
+        # Seen once in the wild: an instance whose ffprobe answered with an
+        # empty document and rc=0. Make that state visible in the log
+        # instead of failing a valid file with 'нет аудиодорожки'.
+        log.warning(
+            "ffprobe returned no streams for %s (rc=%s, stderr=%r)",
+            path,
+            result.returncode,
+            (result.stderr or "")[:200],
+        )
     return {
         "format": fmt.get("format_name", ""),
         "duration": float(fmt.get("duration") or 0.0),

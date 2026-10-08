@@ -71,6 +71,25 @@ def test_probe_returns_empty_dict_when_ffprobe_fails(
     assert probe(tmp_path / "a.pdf", settings) == {}
 
 
+def test_probe_logs_empty_ffprobe_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An ffprobe that answers with an empty document is logged, not silent."""
+    settings = _settings(tmp_path)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("stenograph.media.subprocess.run", fake_run)
+
+    with caplog.at_level("WARNING", logger="stenograph.media"):
+        meta = probe(tmp_path / "a.mp3", settings)
+
+    assert meta["has_audio"] is False
+    assert meta["format"] == ""
+    assert "returned no streams" in caplog.text
+
+
 def test_extract_audio_reports_non_media_clearly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
