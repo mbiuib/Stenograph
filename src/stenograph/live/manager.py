@@ -32,9 +32,35 @@ CaptureFactory = Callable[..., capture_module.AudioSource]
 DEFAULT_TRACKS: tuple[str, ...] = ("system", "mic")
 
 
-def _default_transcriber_factory(settings: Settings) -> TranscriberFactory:
-    """Build window transcribers backed by one lazily loaded whisper engine."""
+_ENGINE_FACTORIES: dict[tuple[str, str, str, str], TranscriberFactory] = {}
+_ENGINE_FACTORIES_LOCK = threading.Lock()
+
+
+def default_transcriber_factory(settings: Settings) -> TranscriberFactory:
+    """Shared window-transcriber factory: one whisper engine per model config.
+
+    Live sessions and the Jigasi bridge share the same engine instance; GPU
+    calls are serialized with an engine lock so concurrent tracks cannot race
+    the model.
+    """
+    key = (
+        settings.live_model,
+        str(settings.models_dir or ""),
+        settings.device,
+        settings.compute_type,
+    )
+    with _ENGINE_FACTORIES_LOCK:
+        factory = _ENGINE_FACTORIES.get(key)
+        if factory is None:
+            factory = _build_transcriber_factory(settings)
+            _ENGINE_FACTORIES[key] = factory
+        return factory
+
+
+def _build_transcriber_factory(settings: Settings) -> TranscriberFactory:
+    """Create a factory bound to one lazily loaded whisper engine."""
     holder: dict[str, Any] = {}
+    engine_lock = threading.Lock()
 
     def factory(language: str | None) -> WindowTranscriber:
         engine = holder.get("engine")
@@ -50,7 +76,8 @@ def _default_transcriber_factory(settings: Settings) -> TranscriberFactory:
             holder["engine"] = engine
 
         def transcribe(audio: np.ndarray) -> list[WindowWord]:
-            return engine.transcribe_window(audio, language=language, beam_size=1)
+            with engine_lock:
+                return engine.transcribe_window(audio, language=language, beam_size=1)
 
         return transcribe
 
@@ -74,7 +101,7 @@ class LiveManager:
         self._settings = settings
         self._repo = repo
         self._bus = bus
-        self._transcriber_factory = transcriber_factory or _default_transcriber_factory(settings)
+        self._transcriber_factory = transcriber_factory or default_transcriber_factory(settings)
         self._capture_factory = capture_factory or capture_module.open_source
         self._reprocess = reprocess
         self._auto_reprocess = auto_reprocess

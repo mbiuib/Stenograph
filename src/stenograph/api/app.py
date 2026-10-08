@@ -15,11 +15,22 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import anyio
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
+from ..bridge.manager import BridgeManager
+from ..bridge.protocol import FrameError, is_eof, parse_frame
+from ..bridge.session import MeetingSession
 from ..config import Settings, get_settings
 from ..domain.models import JobStatus
 from ..engines import available_asr
@@ -34,8 +45,9 @@ def create_app(
     settings: Settings | None = None,
     service: TranscriptionService | None = None,
     live: LiveManager | None = None,
+    bridge: BridgeManager | None = None,
 ) -> FastAPI:
-    """Build the web application; inject a service/live manager for tests."""
+    """Build the web application; inject a service/live/bridge manager for tests."""
     settings = settings or get_settings()
     settings.ensure_dirs()
     service = service or build_default_service(settings)
@@ -46,11 +58,13 @@ def create_app(
         reprocess=service.reprocess_job,
         auto_reprocess=settings.live_auto_reprocess,
     )
+    bridge = bridge or BridgeManager(settings, service.repo, service.bus)
 
     app = FastAPI(title="Стенограф", version=__version__)
     app.state.settings = settings
     app.state.service = service
     app.state.live = live
+    app.state.bridge = bridge
 
     @app.get("/api/health")
     def health() -> dict:
@@ -253,6 +267,40 @@ def create_app(
             raise HTTPException(status_code=404, detail="нет активной live-сессии")
         return job.model_dump()
 
+    # -- Jigasi bridge (streaming-whisper protocol) ---------------------------
+
+    @app.websocket("/ws/{meeting_id}")
+    async def whisper_stream(websocket: WebSocket, meeting_id: str) -> None:
+        """Transcription endpoint consumed by Jigasi's WhisperTranscriptionService.
+
+        Jigasi dials this URL itself (whisper.websocket_url config) when a
+        transcription is started in a conference; binary frames carry the
+        60-byte participant header + int16 PCM, caption JSON flows back.
+        """
+        await websocket.accept()
+        session = bridge.start(meeting_id)
+        log.info("jitsi bridge: websocket подключён (%s)", meeting_id)
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_caption_sender, websocket, session)
+                try:
+                    async for data in websocket.iter_bytes():
+                        if is_eof(data):
+                            log.info("jitsi bridge: получен EOF (%s)", meeting_id)
+                            break
+                        try:
+                            participant_id, language, audio = parse_frame(data)
+                        except FrameError as exc:
+                            log.warning("jitsi bridge: плохой кадр (%s): %s", meeting_id, exc)
+                            continue
+                        session.feed(participant_id, language, audio)
+                except WebSocketDisconnect:
+                    log.info("jitsi bridge: websocket отключён (%s)", meeting_id)
+                await anyio.to_thread.run_sync(session.stop)
+        finally:
+            bridge.end(meeting_id, session)
+            log.info("jitsi bridge: сессия закрыта (%s)", meeting_id)
+
     # -- static frontend (built by Vite into <repo>/frontend/dist) ----------
 
     frontend_dist = settings.frontend_dist or (
@@ -279,3 +327,17 @@ def create_app(
 def _sse(payload: dict) -> str:
     """Format one server-sent event frame."""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _caption_sender(websocket: WebSocket, session: MeetingSession) -> None:
+    """Forward caption messages (partial/final JSON) from the worker to Jigasi."""
+    while True:
+        message = await anyio.to_thread.run_sync(session.dequeue, 0.5)
+        if message is None:
+            continue
+        if message == "":  # session closed and drained
+            break
+        try:
+            await websocket.send_text(message)
+        except Exception:  # noqa: BLE001 — a dead client just ends the sender
+            break
