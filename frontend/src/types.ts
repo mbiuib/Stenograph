@@ -107,10 +107,22 @@ export interface AppConfig {
   llm?: { model: string; base_url: string };
 }
 
+export interface LiveSessionInfo {
+  job_id: string;
+  source_name: string;
+  capture: string;
+  tracks: string[];
+  started_at: number;
+  lag_sec: number;
+  transcribing: boolean;
+  queue_position: number | null;
+}
+
 export interface LiveStatus {
   active: boolean;
   supported: boolean;
-  job?: Job;
+  sessions: LiveSessionInfo[];
+  serving: string | null;
 }
 
 export interface LiveDevices {

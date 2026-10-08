@@ -252,7 +252,7 @@ def create_app(
 
     @app.get("/api/live/status")
     def live_status() -> dict:
-        """Live session state: active or idle, plus capture availability."""
+        """Live sessions and the transcription queue state, plus capture availability."""
         return live.status()
 
     @app.get("/api/live/devices")
@@ -269,22 +269,30 @@ def create_app(
         tracks: str | None = Form(default=None),
         language: str | None = Form(default=None),
     ) -> dict:
-        """Start a live capture session; tracks is a comma-separated list."""
+        """Start a server-side capture session; tracks is a comma-separated list.
+
+        Only one server-side (WASAPI) session can run at a time — browser
+        sessions are unlimited and don't conflict with it.
+        """
         selected = [item.strip() for item in (tracks or "").split(",") if item.strip()]
         try:
             job = live.start(selected or None, language)
         except CaptureError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:  # session already running / bad tracks
+        except RuntimeError as exc:  # a server session is already running / bad tracks
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return job.model_dump()
 
     @app.post("/api/live/stop")
-    def live_stop() -> dict:
-        """Stop the active session and return the finalized job."""
-        job = live.stop()
+    def live_stop(job_id: str | None = Form(default=None)) -> dict:
+        """Stop one live session and return the finalized job.
+
+        Without ``job_id`` the server-side capture session is stopped; pass a
+        browser session's id to stop that one instead.
+        """
+        job = live.stop_session(job_id) if job_id else live.stop()
         if job is None:
             raise HTTPException(status_code=404, detail="нет активной live-сессии")
         return job.model_dump()
@@ -298,8 +306,10 @@ def create_app(
         Handshake (text JSON): ``{"type":"start","tracks":["mic","system"],
         "language":"ru"}``; the answer is ``{"type":"ready","job_id":…}``.
         Binary frames: one track byte (0 = mic, 1 = system) + int16 LE
-        16 kHz mono PCM. ``{"type":"stop"}`` or a disconnect finalizes the
-        job and chains the quality re-pass over the recorded audio.
+        16 kHz mono PCM. Any number of browser sessions can run at once; the
+        shared decode queue transcribes them turn by turn. ``{"type":"stop"}``
+        or a disconnect finalizes this session and chains the quality re-pass
+        over its recorded audio.
         """
         await websocket.accept()
         session = None
@@ -357,7 +367,7 @@ def create_app(
                 log.debug("live: не удалось отправить ошибку клиенту", exc_info=True)
         finally:
             if session is not None:
-                await anyio.to_thread.run_sync(live.stop)
+                await anyio.to_thread.run_sync(live.stop_session, session.job.id)
                 log.info("live: браузерная сессия %s закрыта", session.job.id)
             with contextlib.suppress(Exception):  # closing a dead socket is fine
                 await websocket.close()

@@ -87,6 +87,11 @@ class StreamTracker:
         """Duration of the uncommitted audio window."""
         return self._buffer.size / self._rate
 
+    @property
+    def lag_seconds(self) -> float:
+        """Audio awaiting inference beyond one normal step (≈0 when caught up)."""
+        return max(0.0, self.buffer_seconds - self._run_mark - self._step_sec)
+
     def ready(self) -> bool:
         """True when at least ``step_sec`` of new audio awaits inference."""
         return self.buffer_seconds - self._run_mark >= self._step_sec

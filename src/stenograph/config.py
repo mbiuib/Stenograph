@@ -39,12 +39,17 @@ class Settings(BaseSettings):
 
     engine: str = "whisper"  # default ASR engine name (see the engines registry)
 
-    # Live mode: WASAPI capture + local-agreement streaming on whisper.
+    # Live mode: WASAPI/browser capture + local-agreement streaming on whisper.
     live_model: str = "large-v3-turbo"
     live_chunk_sec: float = 0.2
     live_step_sec: float = 0.8
     live_max_window_sec: float = 25.0
     live_auto_reprocess: bool = True  # re-run the recording through MOSS after stop
+    # Transcription queue: one decode worker serves all live sessions; these
+    # bound how much GPU work a single session may take per queue turn (so a
+    # backlogged recording cannot starve the others).
+    live_turn_ticks: int = 6  # max whisper steps per session per turn
+    live_turn_sec: float = 2.0  # max wall-clock seconds of GPU work per turn
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

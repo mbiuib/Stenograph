@@ -68,6 +68,20 @@ def test_step_gating_skips_small_feeds() -> None:
     assert transcriber.windows == []
 
 
+def test_lag_seconds_measures_untranscribed_backlog() -> None:
+    """lag_seconds stays ~0 when caught up and grows while inference is deferred."""
+    tracker, _, _, _ = _make_tracker(
+        [[(0.0, 0.9, "раз")], [(0.0, 0.9, "раз")]],
+    )
+    tracker.feed(speech_audio(1.0))
+    tracker.tick()  # one step consumed: caught up again
+    assert tracker.lag_seconds == 0.0
+
+    # 3 s of new audio arrive, no inference runs (GPU busy elsewhere)
+    tracker.feed(speech_audio(3.0))
+    assert tracker.lag_seconds > 2.0
+
+
 def test_flush_commits_the_tail() -> None:
     """flush() transcribes whatever remains and clears the window."""
     tracker, _, finals, partials = _make_tracker([[(0.0, 0.5, "конец")]])

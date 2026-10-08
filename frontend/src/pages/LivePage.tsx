@@ -6,7 +6,7 @@ import { Card, EmptyState, ErrorBanner } from "../components/ui";
 import { fmtClock, fmtTimestamp, speakerColor } from "../format";
 import { useJobStream, useNow, usePolling } from "../hooks";
 import { startLiveCapture, type LiveCapture, type LiveTrack } from "../live/capture";
-import type { Job } from "../types";
+import type { Job, LiveSessionInfo } from "../types";
 
 const LIVE_SPEAKERS = ["Они", "Вы"];
 const LANGUAGES = [
@@ -38,7 +38,8 @@ export function LivePage() {
     3000,
   );
 
-  const foreignSession = Boolean(status?.active) && activeJobId === null;
+  const mySession = status?.sessions.find((item) => item.job_id === activeJobId) ?? null;
+  const otherSessions = (status?.sessions ?? []).filter((item) => item.job_id !== activeJobId);
   const insecure = !window.isSecureContext;
 
   const improve = async () => {
@@ -132,13 +133,17 @@ export function LivePage() {
       {errors.map((message) => (
         <ErrorBanner key={message} message={message as string} />
       ))}
-      {foreignSession && (
-        <ErrorBanner message="Идёт live-сессия, запущенная из другой вкладки или другим пользователем. Дождитесь её завершения." />
+      {otherSessions.length > 0 && (
+        <div className="rounded-lg border border-edge bg-surface px-3 py-2 text-xs text-muted">
+          Сейчас идут ещё записи: {otherSessions.length}. Распознавание общее — текст может
+          появляться с задержкой.
+        </div>
       )}
 
       {activeJobId ? (
         <ActiveSession
           job={stream.job}
+          session={mySession}
           startedAt={startedAt}
           stream={stream}
           levels={levels}
@@ -198,6 +203,7 @@ export function LivePage() {
           onStart={() => void start()}
           busy={busy}
           insecure={insecure}
+          othersRecording={otherSessions.length}
         />
       )}
     </div>
@@ -214,6 +220,7 @@ function StartPanel({
   onStart,
   busy,
   insecure,
+  othersRecording,
 }: {
   mic: boolean;
   system: boolean;
@@ -224,6 +231,7 @@ function StartPanel({
   onStart: () => void;
   busy: boolean;
   insecure: boolean;
+  othersRecording: number;
 }) {
   const sources = [
     {
@@ -290,6 +298,12 @@ function StartPanel({
           <IconMic className="size-4" />
           {busy ? "Запускаем…" : "Начать запись"}
         </button>
+        {othersRecording > 0 && (
+          <p className="text-xs text-muted">
+            Сейчас идут ещё записи: {othersRecording}. Начинать можно — распознавание встанет в
+            общую очередь, первые фразы появятся чуть позже.
+          </p>
+        )}
       </Card>
 
       <Card title="Как это работает" bodyClassName="flex flex-col gap-3 p-4 text-sm text-muted">
@@ -297,6 +311,12 @@ function StartPanel({
           Запись идёт из этого браузера: микрофон и, по желанию, звук системы. Аудио уходит
           на сервер «Стенографа» и распознаётся на ходу моделью whisper-turbo — устойчивый
           текст появляется с задержкой 1–2 с, черновик фразы показан серым.
+        </p>
+        <p>
+          Записывать могут несколько человек одновременно. Распознавание идёт через общую
+          очередь сервера: при нескольких записях очередь достаётся каждой по кругу, поэтому
+          чужой текст может появиться раньше вашего, а ваша запись ничего не теряет — она
+          просто догоняет следом. Задержка и позиция в очереди видны над транскриптом.
         </p>
         <p>
           Спикеры разделяются по источникам: собеседники из созвона («Они») и ваш микрофон
@@ -315,6 +335,7 @@ function StartPanel({
 
 function ActiveSession({
   job,
+  session,
   startedAt,
   stream,
   levels,
@@ -323,6 +344,7 @@ function ActiveSession({
   onStop,
 }: {
   job: Job | null;
+  session: LiveSessionInfo | null;
   startedAt: number | null;
   stream: ReturnType<typeof useJobStream>;
   levels: Record<string, number>;
@@ -331,6 +353,15 @@ function ActiveSession({
   onStop: () => void;
 }) {
   const elapsed = startedAt != null ? Math.max(0, now / 1000 - startedAt) : 0;
+  const transcriptionState = session
+    ? session.transcribing
+      ? "распознавание идёт"
+      : session.queue_position != null
+        ? `в очереди на распознавание (№${session.queue_position})`
+        : "распознавание успевает"
+    : null;
+  const lagHint =
+    session && session.lag_sec >= 2 ? `задержка ≈ ${Math.round(session.lag_sec)} с` : null;
   const partials = LIVE_SPEAKERS.map((speaker) => [speaker, stream.partials[speaker]] as const).filter(
     (entry) => entry[1],
   );
@@ -359,6 +390,12 @@ function ActiveSession({
             <div className="flex flex-col text-xs text-muted">
               <span>источник: браузер</span>
               <span>язык: {job?.language ?? "авто"}</span>
+              {transcriptionState && (
+                <span>
+                  {transcriptionState}
+                  {lagHint ? ` · ${lagHint}` : ""}
+                </span>
+              )}
             </div>
           </div>
           <button
