@@ -39,6 +39,25 @@ EXTRACT_UNTIL = 5  # ... and for audio extraction
 ASR_UNTIL = 99  # ASR fills everything up to this
 REPROCESS_UNTIL = 99  # reprocess spreads track progress up to this
 ANALYSIS_UNTIL = 99  # analysis spreads LLM step progress up to this
+PROGRESS_SAVE_SEC = 1.0  # throttle for repository writes during progress ticks
+
+
+def _progress_saver(repo: JobRepository, job: Job) -> Callable[[], None]:
+    """Repository write throttled to PROGRESS_SAVE_SEC for progress ticks.
+
+    The job list polls the REST API, which reads the repository — progress
+    must be persisted, but not on every engine tick; once a second is plenty.
+    """
+    last = 0.0
+
+    def save() -> None:
+        nonlocal last
+        now = time.time()
+        if now - last >= PROGRESS_SAVE_SEC:
+            last = now
+            repo.save(job)
+
+    return save
 
 
 def run_file_job(
@@ -89,9 +108,12 @@ def run_file_job(
 
         transition(JobStatus.RUNNING, "Транскрибация…", EXTRACT_UNTIL)
 
+        save_progress = _progress_saver(repo, job)
+
         def on_progress(tick: TranscribeProgress) -> None:
             job.progress = EXTRACT_UNTIL + int(tick.fraction * (ASR_UNTIL - EXTRACT_UNTIL))
             job.message = tick.message
+            save_progress()
             emit({"type": "progress", "value": job.progress, "message": tick.message})
 
         streamed = 0
@@ -208,6 +230,7 @@ def run_reprocess_job(
         speechless: list[str] = []
         language = ""
         span = (REPROCESS_UNTIL - 1) / len(tracks)
+        save_progress = _progress_saver(repo, job)
 
         def make_callbacks(
             track: str, index: int, base: float
@@ -216,6 +239,7 @@ def run_reprocess_job(
                 value = int(base + tick.fraction * span)
                 job.progress = value
                 job.message = f"Дорожка {index + 1}/{len(tracks)}: {tick.message}"
+                save_progress()
                 emit({"type": "progress", "value": value, "message": job.message})
 
             def on_segment(segment: Segment) -> None:

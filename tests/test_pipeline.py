@@ -7,10 +7,10 @@ import pytest
 from fakes import FakeEngine
 from stenograph.config import Settings
 from stenograph.domain.errors import JobCancelled
-from stenograph.domain.models import Job, JobStatus
-from stenograph.engines.base import TranscribeOptions
+from stenograph.domain.models import Job, JobStatus, Segment
+from stenograph.engines.base import AsrResult, TranscribeOptions, TranscribeProgress
 from stenograph.events import EventBus
-from stenograph.pipeline import run_file_job
+from stenograph.pipeline import ASR_UNTIL, EXTRACT_UNTIL, run_file_job
 from stenograph.storage import JobRepository
 
 
@@ -52,6 +52,69 @@ def test_pipeline_replaces_storage_name_in_read_errors(
     assert job.status == JobStatus.ERROR
     assert "Стандартная запись 3.pdf" in (job.error or "")
     assert "85c7e83a" not in (job.error or "")
+
+
+class _ProgressEngine:
+    """Engine double: emits two progress ticks, reading the repo after each."""
+
+    name = "fake-progress"
+
+    def __init__(self, repo: JobRepository, job_id: str, seen: list[int]) -> None:
+        self._repo = repo
+        self._job_id = job_id
+        self._seen = seen
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        options: TranscribeOptions,
+        *,
+        on_progress=None,
+        on_segment=None,
+        is_cancelled=None,
+    ) -> AsrResult:
+        for fraction in (0.25, 0.75):
+            if on_progress:
+                on_progress(TranscribeProgress(fraction=fraction, message="тик"))
+            stored = self._repo.get(self._job_id)
+            self._seen.append(stored.progress if stored else -1)
+        return AsrResult(
+            language="ru",
+            duration=2.0,
+            segments=[Segment(index=0, start=0.0, end=1.0, text="тест")],
+        )
+
+
+def test_file_pipeline_persists_progress_for_list_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Progress ticks reach the repository — the job list reads the DB."""
+    monkeypatch.setattr("stenograph.pipeline.PROGRESS_SAVE_SEC", 0.0)
+    settings = _settings(tmp_path)
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"\x00" * 32)
+    job = Job(source_name="clip.wav", source_path=str(audio))
+    repo.save(job)
+
+    seen: list[int] = []
+    run_file_job(
+        job,
+        settings=settings,
+        repo=repo,
+        bus=bus,
+        engine=_ProgressEngine(repo, job.id, seen),
+        options=TranscribeOptions(),
+        is_cancelled=lambda: False,
+    )
+
+    expected = [
+        EXTRACT_UNTIL + int(fraction * (ASR_UNTIL - EXTRACT_UNTIL)) for fraction in (0.25, 0.75)
+    ]
+    assert seen == expected
+    assert job.status == JobStatus.DONE
 
 
 def test_pipeline_runs_to_completion(tmp_path: Path) -> None:
