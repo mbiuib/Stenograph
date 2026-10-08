@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { IconMic } from "../components/Icons";
@@ -334,6 +334,21 @@ function ActiveSession({
   const partials = LIVE_SPEAKERS.map((speaker) => [speaker, stream.partials[speaker]] as const).filter(
     (entry) => entry[1],
   );
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const pinnedRef = useRef(true);
+  const partialText = partials.map(([, text]) => text).join("|");
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || !pinnedRef.current) return;
+    element.scrollTop = element.scrollHeight;
+  }, [stream.segments.length, partialText]);
+
+  const trackScroll = () => {
+    const element = scrollRef.current;
+    if (!element) return;
+    pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+  };
 
   return (
     <>
@@ -373,7 +388,11 @@ function ActiveSession({
             hint="Проверьте, что звук идёт в выбранный источник — индикаторы выше должны двигаться."
           />
         ) : (
-          <div className="flex max-h-[60vh] flex-col gap-2.5 overflow-y-auto">
+          <div
+            ref={scrollRef}
+            onScroll={trackScroll}
+            className="flex max-h-[60vh] flex-col gap-2.5 overflow-y-auto"
+          >
             {stream.segments.map((segment) => (
               <div key={`${segment.index}-${segment.start}`} className="flex flex-col gap-0.5">
                 <div className="flex items-center gap-2 text-xs text-muted">
