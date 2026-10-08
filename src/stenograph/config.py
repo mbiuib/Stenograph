@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # LLM post-processing (protocol / summary) via an OpenAI-compatible server.
     llm_base_url: str = "http://127.0.0.1:1234/v1"
-    llm_model: str = "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    llm_model: str = "gemma-3-4b-it"
     llm_api_key: str | None = None
     llm_timeout_sec: float = 600.0
     llm_max_tokens: int = 4096
