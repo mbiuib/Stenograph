@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { IconMic } from "../components/Icons";
 import { Card, EmptyState, ErrorBanner } from "../components/ui";
 import { fmtClock, fmtTimestamp, speakerColor } from "../format";
 import { useJobStream, useNow, usePolling } from "../hooks";
-import type { Job, LiveDevices } from "../types";
+import { startLiveCapture, type LiveCapture, type LiveTrack } from "../live/capture";
+import type { Job } from "../types";
 
 const LIVE_SPEAKERS = ["Они", "Вы"];
 const LANGUAGES = [
@@ -15,24 +16,30 @@ const LANGUAGES = [
 ];
 
 export function LivePage() {
-  const { data: status, error: statusError } = usePolling(() => api.liveStatus(), 2000);
-  const { data: devices } = usePolling(() => api.liveDevices(), 60000);
-  const { data: engines } = usePolling(() => api.engines(), 60000);
-  const { data: config } = usePolling(() => api.config(), 60000);
-  const [tracks, setTracks] = useState<Record<string, boolean>>({ system: true, mic: true });
+  const [mic, setMic] = useState(true);
+  const [system, setSystem] = useState(true);
   const [language, setLanguage] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
   const [lastJobId, setLastJobId] = useState<string | null>(null);
+  const [levels, setLevels] = useState<Record<string, number>>({ mic: 0, system: 0 });
   const [reprocessBusy, setReprocessBusy] = useState(false);
+  const captureRef = useRef<LiveCapture | null>(null);
 
-  const activeJob = status?.active && status.job ? status.job : null;
-  const stream = useJobStream(activeJob?.id);
+  const { data: status } = usePolling(() => api.liveStatus(), 3000);
+  const { data: engines } = usePolling(() => api.engines(), 60000);
+  const { data: config } = usePolling(() => api.config(), 60000);
+  const stream = useJobStream(activeJobId ?? undefined);
   const now = useNow(1000);
   const { data: finishedJob } = usePolling(
     () => (lastJobId ? api.getJob(lastJobId) : Promise.resolve(null)),
     3000,
   );
+
+  const foreignSession = Boolean(status?.active) && activeJobId === null;
+  const insecure = !window.isSecureContext;
 
   const improve = async () => {
     if (!lastJobId) return;
@@ -48,10 +55,10 @@ export function LivePage() {
   };
 
   const start = async () => {
-    const selected = Object.entries(tracks)
-      .filter(([, enabled]) => enabled)
-      .map(([track]) => track);
-    if (selected.length === 0) {
+    const tracks: LiveTrack[] = [];
+    if (mic) tracks.push("mic");
+    if (system) tracks.push("system");
+    if (tracks.length === 0) {
       setActionError("Выберите хотя бы один источник");
       return;
     }
@@ -59,7 +66,25 @@ export function LivePage() {
     setActionError(null);
     setLastJobId(null);
     try {
-      await api.liveStart(selected, language || undefined);
+      const capture = await startLiveCapture({
+        tracks,
+        language: language || null,
+        onLevel: (track, rms) => setLevels((prev) => ({ ...prev, [track]: rms })),
+        onClosed: (reason) => {
+          if (captureRef.current) {
+            captureRef.current = null;
+            setLevels({ mic: 0, system: 0 });
+            setActiveJobId((current) => {
+              if (current) setLastJobId(current);
+              return null;
+            });
+            setActionError(`Сессия завершена: ${reason}`);
+          }
+        },
+      });
+      captureRef.current = capture;
+      setStartedAt(Date.now() / 1000);
+      setActiveJobId(capture.jobId);
     } catch (err) {
       setActionError(`Не удалось начать запись: ${(err as Error).message}`);
     } finally {
@@ -68,19 +93,24 @@ export function LivePage() {
   };
 
   const stop = async () => {
+    const capture = captureRef.current;
+    if (!capture) return;
     setBusy(true);
     setActionError(null);
     try {
-      const job = await api.liveStop();
-      setLastJobId(job.id);
-    } catch (err) {
-      setActionError(`Не удалось остановить запись: ${(err as Error).message}`);
+      await capture.stop();
+    } catch {
+      /* сервер завершит сессию сам */
     } finally {
+      captureRef.current = null;
+      setLevels({ mic: 0, system: 0 });
+      setLastJobId(capture.jobId);
+      setActiveJobId(null);
       setBusy(false);
     }
   };
 
-  const errors = [statusError, stream.error, actionError].filter(Boolean);
+  const errors = [actionError, stream.error].filter(Boolean);
 
   return (
     <div className="flex flex-col gap-5">
@@ -88,10 +118,10 @@ export function LivePage() {
         <div>
           <h1 className="text-xl font-semibold">Live</h1>
           <p className="mt-1 text-sm text-muted">
-            Распознавание в реальном времени: системный звук («Они») и микрофон («Вы»).
+            Запись из браузера: микрофон («Вы») и звук системы («Они») — с распознаванием на лету.
           </p>
         </div>
-        {activeJob && (
+        {activeJobId && (
           <span className="inline-flex items-center gap-2 rounded-lg border border-warn/40 px-3 py-2 text-sm text-warn">
             <span className="animate-pulse-soft size-2 rounded-full bg-warn" />
             Запись идёт
@@ -102,12 +132,20 @@ export function LivePage() {
       {errors.map((message) => (
         <ErrorBanner key={message} message={message as string} />
       ))}
-      {status && !status.supported && (
-        <ErrorBanner message="WASAPI-захват недоступен на этой системе — live-режим выключен." />
+      {foreignSession && (
+        <ErrorBanner message="Идёт live-сессия, запущенная из другой вкладки или другим пользователем. Дождитесь её завершения." />
       )}
 
-      {activeJob ? (
-        <ActiveSession job={activeJob} stream={stream} now={now} busy={busy} onStop={() => void stop()} />
+      {activeJobId ? (
+        <ActiveSession
+          job={stream.job}
+          startedAt={startedAt}
+          stream={stream}
+          levels={levels}
+          now={now}
+          busy={busy}
+          onStop={() => void stop()}
+        />
       ) : lastJobId ? (
         <Card bodyClassName="p-6">
           <div className="flex flex-col items-start gap-3">
@@ -151,14 +189,15 @@ export function LivePage() {
         </Card>
       ) : (
         <StartPanel
-          devices={devices}
-          tracks={tracks}
-          onToggle={(track) => setTracks((prev) => ({ ...prev, [track]: !prev[track] }))}
+          mic={mic}
+          system={system}
+          onMic={setMic}
+          onSystem={setSystem}
           language={language}
           onLanguage={setLanguage}
           onStart={() => void start()}
           busy={busy}
-          supported={status ? status.supported : true}
+          insecure={insecure}
         />
       )}
     </div>
@@ -166,38 +205,40 @@ export function LivePage() {
 }
 
 function StartPanel({
-  devices,
-  tracks,
-  onToggle,
+  mic,
+  system,
+  onMic,
+  onSystem,
   language,
   onLanguage,
   onStart,
   busy,
-  supported,
+  insecure,
 }: {
-  devices: LiveDevices | null;
-  tracks: Record<string, boolean>;
-  onToggle: (track: string) => void;
+  mic: boolean;
+  system: boolean;
+  onMic: (value: boolean) => void;
+  onSystem: (value: boolean) => void;
   language: string;
   onLanguage: (value: string) => void;
   onStart: () => void;
   busy: boolean;
-  supported: boolean;
+  insecure: boolean;
 }) {
   const sources = [
     {
-      track: "system",
-      title: "Системный звук — «Они»",
-      hint: devices?.devices.loopback
-        ? `Loopback: ${devices.devices.loopback}`
-        : "Всё, что воспроизводится на колонках: созвон, видео, плеер",
+      track: "mic",
+      checked: mic,
+      toggle: () => onMic(!mic),
+      title: "Микрофон — «Вы»",
+      hint: "Микрофон этого компьютера — браузер попросит разрешение",
     },
     {
-      track: "mic",
-      title: "Микрофон — «Вы»",
-      hint: devices?.devices.microphone
-        ? `Устройство: ${devices.devices.microphone}`
-        : "Микрофон по умолчанию (можно использовать наушники с гарнитурой)",
+      track: "system",
+      checked: system,
+      toggle: () => onSystem(!system),
+      title: "Звук системы — «Они»",
+      hint: "Созвон, видео, вкладка: в окне выбора отметьте «Поделиться звуком» (Chrome/Edge)",
     },
   ];
 
@@ -211,13 +252,13 @@ function StartPanel({
           >
             <input
               type="checkbox"
-              checked={tracks[source.track] ?? false}
-              onChange={() => onToggle(source.track)}
+              checked={source.checked}
+              onChange={source.toggle}
               className="mt-0.5 size-4 accent-cyan-400"
             />
             <span className="min-w-0">
               <span className="block text-sm font-medium">{source.title}</span>
-              <span className="block truncate text-xs text-muted">{source.hint}</span>
+              <span className="block text-xs text-muted">{source.hint}</span>
             </span>
           </label>
         ))}
@@ -235,9 +276,15 @@ function StartPanel({
             ))}
           </select>
         </label>
+        {insecure && (
+          <div className="rounded-lg border border-warn/40 p-3 text-xs text-warn">
+            Страница открыта не по HTTPS — браузер не даст доступ к микрофону на этом адресе.
+            Откройте веб «Стенографа» по https:// (в локальной сети) или на localhost.
+          </div>
+        )}
         <button
           onClick={onStart}
-          disabled={busy || !supported}
+          disabled={busy || insecure}
           className="mt-1 inline-flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-accent2 to-accent px-5 py-2.5 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <IconMic className="size-4" />
@@ -247,19 +294,19 @@ function StartPanel({
 
       <Card title="Как это работает" bodyClassName="flex flex-col gap-3 p-4 text-sm text-muted">
         <p>
-          Речь распознаётся по ходу записи моделью whisper-turbo: устойчивый текст
-          появляется с задержкой 1–2 с, черновик текущей фразы показан серым.
+          Запись идёт из этого браузера: микрофон и, по желанию, звук системы. Аудио уходит
+          на сервер «Стенографа» и распознаётся на ходу моделью whisper-turbo — устойчивый
+          текст появляется с задержкой 1–2 с, черновик фразы показан серым.
         </p>
         <p>
-          Спикеры разделяются по источникам: собеседники из созвона («Они») и ваш
-          микрофон («Вы»). Двух собеседников внутри системного звука live-режим не
-          различает — диаризацию сделает точный движок при повторной обработке.
+          Спикеры разделяются по источникам: собеседники из созвона («Они») и ваш микрофон
+          («Вы»). Двух собеседников внутри системного звука live-режим не различает —
+          диаризацию сделает точный движок при повторной обработке.
         </p>
         <p>
-          Аудио обеих дорожек сохраняется. После остановки запись автоматически
-          уходит на повторную обработку точным движком (moss): итоговая задача —
-          с реальными спикерами; при отключённом автозапуске есть кнопка
-          «Улучшить» на странице задачи.
+          Аудио обеих дорожек сохраняется на сервере. После остановки запись автоматически
+          уходит на повторную обработку точным движком (moss): итоговая задача — с реальными
+          спикерами; при отключённом автозапуске есть кнопка «Улучшить» на странице задачи.
         </p>
       </Card>
     </div>
@@ -268,18 +315,22 @@ function StartPanel({
 
 function ActiveSession({
   job,
+  startedAt,
   stream,
+  levels,
   now,
   busy,
   onStop,
 }: {
-  job: Job;
+  job: Job | null;
+  startedAt: number | null;
   stream: ReturnType<typeof useJobStream>;
+  levels: Record<string, number>;
   now: number;
   busy: boolean;
   onStop: () => void;
 }) {
-  const elapsed = job.started_at != null ? Math.max(0, now / 1000 - job.started_at) : 0;
+  const elapsed = startedAt != null ? Math.max(0, now / 1000 - startedAt) : 0;
   const partials = LIVE_SPEAKERS.map((speaker) => [speaker, stream.partials[speaker]] as const).filter(
     (entry) => entry[1],
   );
@@ -291,8 +342,8 @@ function ActiveSession({
           <div className="flex items-center gap-3">
             <span className="tabular text-3xl font-semibold">{fmtClock(elapsed)}</span>
             <div className="flex flex-col text-xs text-muted">
-              <span>движок: {String(job.meta.engine ?? "whisper")}</span>
-              <span>язык: {job.language ?? "авто"}</span>
+              <span>источник: браузер</span>
+              <span>язык: {job?.language ?? "авто"}</span>
             </div>
           </div>
           <button
@@ -309,7 +360,7 @@ function ActiveSession({
               key={speaker}
               label={speaker}
               color={speakerColor(speaker, LIVE_SPEAKERS)}
-              level={speaker === "Вы" ? stream.levels.mic ?? 0 : stream.levels.system ?? 0}
+              level={speaker === "Вы" ? levels.mic ?? 0 : levels.system ?? 0}
             />
           ))}
         </div>
