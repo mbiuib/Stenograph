@@ -22,9 +22,13 @@ const LANGUAGES = [
   { value: "en", label: "English" },
 ];
 
+// Mobile browsers have no getDisplayMedia at all: system-audio capture is
+// desktop-Chrome/Edge only (we still offer microphone recording there).
+const CAN_SHARE_SYSTEM = typeof navigator.mediaDevices?.getDisplayMedia === "function";
+
 export function LivePage() {
   const [mic, setMic] = useState(true);
-  const [system, setSystem] = useState(true);
+  const [system, setSystem] = useState(CAN_SHARE_SYSTEM);
   const [language, setLanguage] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -198,6 +202,7 @@ export function LivePage() {
           busy={busy}
           insecure={insecure}
           othersRecording={otherSessions.length}
+          systemSupported={CAN_SHARE_SYSTEM}
         />
       )}
     </div>
@@ -215,6 +220,7 @@ function StartPanel({
   busy,
   insecure,
   othersRecording,
+  systemSupported,
 }: {
   mic: boolean;
   system: boolean;
@@ -226,6 +232,7 @@ function StartPanel({
   busy: boolean;
   insecure: boolean;
   othersRecording: number;
+  systemSupported: boolean;
 }) {
   const sources = [
     {
@@ -234,13 +241,17 @@ function StartPanel({
       toggle: () => onMic(!mic),
       title: "Микрофон — «Вы»",
       hint: "Микрофон этого компьютера — браузер попросит разрешение",
+      disabled: false,
     },
     {
       track: "system",
       checked: system,
       toggle: () => onSystem(!system),
       title: "Звук системы — «Они»",
-      hint: "Созвон, видео, вкладка: в окне выбора отметьте «Поделиться звуком» (Chrome/Edge)",
+      hint: systemSupported
+        ? "Созвон, видео, вкладка: в окне выбора отметьте «Поделиться звуком» (Chrome/Edge)"
+        : "Недоступно в этом браузере: телефоны и планшеты не отдают звук системы. Здесь можно записать только микрофон.",
+      disabled: !systemSupported,
     },
   ];
 
@@ -250,13 +261,18 @@ function StartPanel({
         {sources.map((source) => (
           <label
             key={source.track}
-            className="flex cursor-pointer items-start gap-3 rounded-lg border border-edge p-3 transition-colors hover:border-accent/40"
+            className={
+              source.disabled
+                ? "flex items-start gap-3 rounded-lg border border-edge bg-surface2/30 p-3 opacity-60"
+                : "flex cursor-pointer items-start gap-3 rounded-lg border border-edge p-3 transition-colors hover:border-accent/40"
+            }
           >
             <input
               type="checkbox"
               checked={source.checked}
               onChange={source.toggle}
-              className="mt-0.5 size-4 accent-cyan-400"
+              disabled={source.disabled}
+              className="mt-0.5 size-4 accent-cyan-400 disabled:cursor-not-allowed"
             />
             <span className="min-w-0">
               <span className="block text-sm font-medium">{source.title}</span>

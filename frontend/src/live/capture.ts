@@ -117,6 +117,11 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
       }
     }
     if (options.tracks.includes("system")) {
+      if (typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
+        throw new Error(
+          "этот браузер не умеет захват звука системы — на телефоне можно записать только микрофон",
+        );
+      }
       let display: MediaStream;
       try {
         display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
