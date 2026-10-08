@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { IconCopy, IconDownload, IconRefresh, IconTrash, IconX } from "../components/Icons";
+import { Markdown } from "../components/Markdown";
 import { Transcript } from "../components/Transcript";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
 import {
@@ -19,6 +20,7 @@ import {
   toTxt,
 } from "../format";
 import { useJobStream, useNow, usePolling } from "../hooks";
+import type { AnalysisKind } from "../types";
 
 const ACTION_CLASS =
   "flex items-center gap-2 rounded-lg border border-edge px-3 py-2 text-sm text-muted hover:text-ink";
@@ -30,8 +32,101 @@ export function JobDetailPage() {
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
   const { data: engines } = usePolling(() => api.engines(), 60000);
+  const { data: appConfig } = usePolling(() => api.config(), 120000);
   const [reprocessBusy, setReprocessBusy] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+
+  const [analysisText, setAnalysisText] = useState<Partial<Record<AnalysisKind, string>>>({});
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisBusy, setAnalysisBusy] = useState<{
+    type: AnalysisKind;
+    jobId: string;
+    progress: number;
+    message: string;
+  } | null>(null);
+
+  const analysisMeta = job?.meta.analysis ?? {};
+  const llmInfo = appConfig?.llm;
+
+  // Подхватываем незавершённый анализ после перезагрузки страницы.
+  useEffect(() => {
+    if (!job || job.kind === "analysis" || analysisBusy) return;
+    const pending = (["protocol", "summary"] as AnalysisKind[]).find(
+      (type) => analysisMeta[type]?.job_id && !analysisMeta[type]?.text && !analysisText[type],
+    );
+    if (!pending) return;
+    const pendingId = analysisMeta[pending]!.job_id;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const child = await api.getJob(pendingId);
+        if (cancelled) return;
+        if (child.status === "queued" || child.status === "running") {
+          setAnalysisBusy({
+            type: pending,
+            jobId: pendingId,
+            progress: child.progress,
+            message: child.message,
+          });
+        } else if (child.status === "done" && child.text) {
+          setAnalysisText((prev) => ({ ...prev, [pending]: child.text }));
+        } else if (child.status === "error") {
+          setAnalysisError(`Не удалось подготовить документ: ${child.error ?? "ошибка"}`);
+        }
+      } catch {
+        /* страница просто останется без результата */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [job, analysisBusy, analysisText, analysisMeta]);
+
+  // Поллим дочернюю задачу, пока идёт генерация.
+  useEffect(() => {
+    if (!analysisBusy) return;
+    const { type, jobId } = analysisBusy;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const child = await api.getJob(jobId);
+          if (child.status === "done" && child.text) {
+            setAnalysisText((prev) => ({ ...prev, [type]: child.text }));
+            setAnalysisBusy(null);
+          } else if (child.status === "error" || child.status === "cancelled") {
+            setAnalysisError(`Анализ не удался: ${child.error ?? "отменено"}`);
+            setAnalysisBusy(null);
+          } else {
+            setAnalysisBusy((prev) =>
+              prev && prev.jobId === jobId
+                ? { ...prev, progress: child.progress, message: child.message }
+                : prev,
+            );
+          }
+        } catch {
+          /* пропускаем такт */
+        }
+      })();
+    }, 1500);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysisBusy?.jobId]);
+
+  const startAnalysis = async (type: AnalysisKind) => {
+    if (!job) return;
+    setAnalysisError(null);
+    try {
+      const child = await api.analyzeJob(job.id, type);
+      setAnalysisBusy({
+        type,
+        jobId: child.id,
+        progress: child.progress,
+        message: child.message,
+      });
+    } catch (err) {
+      setAnalysisError(`Не удалось запустить анализ: ${(err as Error).message}`);
+    }
+  };
 
   const speakers = useMemo(() => speakerOrder(segments), [segments]);
 
@@ -50,7 +145,8 @@ export function JobDetailPage() {
   const elapsed = job.started_at != null ? now / 1000 - job.started_at : null;
 
   const copyText = async () => {
-    await navigator.clipboard.writeText(toTxt(job)).catch(() => {});
+    const value = job.kind === "analysis" ? job.text : toTxt(job);
+    await navigator.clipboard.writeText(value).catch(() => {});
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };
@@ -104,6 +200,14 @@ export function JobDetailPage() {
               <Chip>
                 <Link to={`/jobs/${job.meta.reprocess_job}`} className="hover:text-accent">
                   улучшенная версия →
+                </Link>
+              </Chip>
+            )}
+            {job.kind === "analysis" && <Chip>анализ</Chip>}
+            {job.kind === "analysis" && job.meta.parent != null && (
+              <Chip>
+                <Link to={`/jobs/${job.meta.parent}`} className="hover:text-accent">
+                  ← исходная задача
                 </Link>
               </Chip>
             )}
@@ -164,25 +268,116 @@ export function JobDetailPage() {
           <button onClick={() => void copyText()} className={ACTION_CLASS}>
             <IconCopy className="size-4" /> {copied ? "Скопировано" : "Копировать текст"}
           </button>
-          <button
-            onClick={() => downloadText(`${baseName(job.source_name)}.txt`, toTxt(job))}
-            className={ACTION_CLASS}
-          >
-            <IconDownload className="size-4" /> TXT
-          </button>
-          <button
-            onClick={() => downloadText(`${baseName(job.source_name)}.srt`, toSrt(job), "application/x-subrip")}
-            className={ACTION_CLASS}
-          >
-            <IconDownload className="size-4" /> SRT
-          </button>
-          <button
-            onClick={() => downloadText(`${baseName(job.source_name)}.json`, toJson(job), "application/json")}
-            className={ACTION_CLASS}
-          >
-            <IconDownload className="size-4" /> JSON
-          </button>
+          {job.kind === "analysis" ? (
+            <button
+              onClick={() =>
+                downloadText(`${baseName(job.source_name)}.md`, job.text, "text/markdown")
+              }
+              className={ACTION_CLASS}
+            >
+              <IconDownload className="size-4" /> Markdown
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => downloadText(`${baseName(job.source_name)}.txt`, toTxt(job))}
+                className={ACTION_CLASS}
+              >
+                <IconDownload className="size-4" /> TXT
+              </button>
+              <button
+                onClick={() => downloadText(`${baseName(job.source_name)}.srt`, toSrt(job), "application/x-subrip")}
+                className={ACTION_CLASS}
+              >
+                <IconDownload className="size-4" /> SRT
+              </button>
+              <button
+                onClick={() => downloadText(`${baseName(job.source_name)}.json`, toJson(job), "application/json")}
+                className={ACTION_CLASS}
+              >
+                <IconDownload className="size-4" /> JSON
+              </button>
+            </>
+          )}
         </div>
+      )}
+
+      {job.kind !== "analysis" && (
+        <Card
+          title="Анализ встречи"
+          action={
+            llmInfo ? <span className="text-xs text-muted">LLM: {llmInfo.model}</span> : undefined
+          }
+          bodyClassName="flex flex-col gap-3 p-4"
+        >
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void startAnalysis("protocol")}
+              disabled={analysisBusy != null || job.status !== "done"}
+              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {analysisBusy?.type === "protocol" ? "Составляем…" : "Составить протокол"}
+            </button>
+            <button
+              onClick={() => void startAnalysis("summary")}
+              disabled={analysisBusy != null || job.status !== "done"}
+              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {analysisBusy?.type === "summary" ? "Готовим…" : "Сделать резюме"}
+            </button>
+          </div>
+          {analysisError && <ErrorBanner message={analysisError} />}
+          {job.status !== "done" && (
+            <p className="text-xs text-muted">Анализ станет доступен после завершения транскрибации.</p>
+          )}
+          {(["protocol", "summary"] as AnalysisKind[]).map((type) => {
+            const entry = analysisMeta[type];
+            const text = analysisText[type] ?? entry?.text;
+            const busy = analysisBusy?.type === type;
+            if (!text && !busy && !entry?.job_id) return null;
+            return (
+              <div key={type} className="rounded-lg border border-edge bg-surface2/40 px-4 py-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">
+                    {type === "protocol" ? "Протокол" : "Резюме"}
+                  </p>
+                  <div className="flex items-center gap-3 text-[11px] text-muted">
+                    {entry?.model && !busy && <span>{entry.model}</span>}
+                    {entry?.finished_at != null && !busy && (
+                      <span>{fmtDateTime(entry.finished_at)}</span>
+                    )}
+                    {entry?.job_id && (
+                      <Link to={`/jobs/${entry.job_id}`} className="hover:text-accent">
+                        открыть
+                      </Link>
+                    )}
+                  </div>
+                </div>
+                {busy ? (
+                  <div className="flex flex-col gap-2 py-1">
+                    <ProgressBar value={analysisBusy.progress} />
+                    <p className="text-xs text-muted">
+                      {analysisBusy.progress}% · {analysisBusy.message || "Генерируем…"}
+                    </p>
+                  </div>
+                ) : text ? (
+                  <Markdown text={text} />
+                ) : (
+                  <p className="text-xs text-muted">Готовим документ…</p>
+                )}
+              </div>
+            );
+          })}
+          {!analysisMeta.protocol?.job_id &&
+            !analysisMeta.summary?.job_id &&
+            !analysisBusy &&
+            job.status === "done" && (
+              <p className="text-xs text-muted">
+                Локальная LLM соберёт из транскрипта протокол с решениями и задачами либо
+                краткое резюме. Текст не покидает машину.
+              </p>
+            )}
+        </Card>
       )}
 
       {speakers.length > 0 && (
@@ -199,17 +394,34 @@ export function JobDetailPage() {
         </div>
       )}
 
-      <Card title="Транскрипт" bodyClassName="p-4">
-        {segments.length > 0 ? (
-          <Transcript segments={segments} speakers={speakers} live={job.status === "running"} />
-        ) : job.status === "done" && job.text ? (
-          <pre className="max-h-[60vh] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
-            {job.text}
-          </pre>
-        ) : (
-          <EmptyState title={live ? "Ожидаем первые сегменты…" : "Транскрипта нет"} />
-        )}
-      </Card>
+      {job.kind === "analysis" ? (
+        <Card
+          title={job.meta.analysis_type === "summary" ? "Резюме встречи" : "Протокол встречи"}
+          bodyClassName="p-4"
+        >
+          {job.text ? (
+            <div className="max-h-[65vh] overflow-y-auto">
+              <Markdown text={job.text} />
+            </div>
+          ) : live ? (
+            <EmptyState title="Готовим документ…" hint={job.message || undefined} />
+          ) : (
+            <EmptyState title="Результата нет" />
+          )}
+        </Card>
+      ) : (
+        <Card title="Транскрипт" bodyClassName="p-4">
+          {segments.length > 0 ? (
+            <Transcript segments={segments} speakers={speakers} live={job.status === "running"} />
+          ) : job.status === "done" && job.text ? (
+            <pre className="max-h-[60vh] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
+              {job.text}
+            </pre>
+          ) : (
+            <EmptyState title={live ? "Ожидаем первые сегменты…" : "Транскрипта нет"} />
+          )}
+        </Card>
+      )}
 
       <Card
         title="Метаданные"

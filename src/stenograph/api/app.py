@@ -142,6 +142,22 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return child.model_dump()
 
+    @app.post("/api/jobs/{job_id}/analyze", status_code=201)
+    def analyze_job(
+        job_id: str, analysis_type: str = Form(alias="type", default="protocol")
+    ) -> dict:
+        """Queue protocol/summary generation for a finished job."""
+        job = service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status != JobStatus.DONE:
+            raise HTTPException(status_code=400, detail="задача ещё не завершена")
+        try:
+            child = service.request_analysis(job, analysis_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return child.model_dump()
+
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str, request: Request) -> StreamingResponse:
         """Server-sent events for one job: a snapshot first, then live updates."""
@@ -194,6 +210,10 @@ def create_app(
             "device": settings.device,
             "compute_type": settings.compute_type,
             "models_dir": str(settings.models_dir) if settings.models_dir else None,
+            "llm": {
+                "model": settings.llm_model,
+                "base_url": settings.llm_base_url,
+            },
         }
 
     @app.get("/api/queue")

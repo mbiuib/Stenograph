@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -18,7 +19,10 @@ from .domain.models import Job, JobStatus
 from .engines import get_asr
 from .engines.base import AsrEngine, TranscribeOptions
 from .events import EventBus
-from .pipeline import run_file_job, run_reprocess_job
+from .llm.analyzer import transcript_text
+from .llm.client import LlmClient
+from .llm.prompts import ANALYSIS_TYPES
+from .pipeline import run_analysis_job, run_file_job, run_reprocess_job
 from .storage import JobRepository
 
 log = logging.getLogger(__name__)
@@ -36,12 +40,14 @@ class TranscriptionService:
         bus: EventBus,
         engine_name: str | None = None,
         engine_factory: EngineFactory | None = None,
+        llm_client: LlmClient | None = None,
     ) -> None:
         self.settings = settings
         self.repo = repo
         self.bus = bus
         self.engine_name = engine_name or settings.engine
         self._engine_factory = engine_factory
+        self._llm = llm_client
         self._engines: dict[str, AsrEngine] = {}  # created lazily on the worker thread
         self._queue: queue.Queue[str] = queue.Queue()
         self._waiting: list[str] = []
@@ -109,6 +115,40 @@ class TranscriptionService:
         self.repo.save(live_job)
         self.bus.publish(live_job.id, {"type": "meta", "meta": live_job.meta})
         return job
+
+    def request_analysis(self, job: Job, analysis_type: str) -> Job:
+        """Queue protocol/summary generation for a finished job.
+
+        One child job per analysis type; while it is queued or running the
+        same child is returned (idempotent). The parent gets a back-reference
+        in ``meta.analysis`` immediately and the full text once the child
+        finishes.
+        """
+        if analysis_type not in ANALYSIS_TYPES:
+            raise ValueError(f"неизвестный тип анализа: {analysis_type}")
+        if job.kind == "analysis":
+            raise ValueError("нельзя анализировать результат анализа")
+        if not transcript_text(job):
+            raise ValueError("у задачи нет транскрипта")
+
+        existing_id = ((job.meta.get("analysis") or {}).get(analysis_type) or {}).get("job_id")
+        if existing_id:
+            existing = self.repo.get(str(existing_id))
+            if existing and existing.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+                return existing
+
+        titles = {"protocol": "Протокол", "summary": "Резюме"}
+        child = Job(kind="analysis", source_name=f"{titles[analysis_type]} — {job.source_name}")
+        child.meta["parent"] = job.id
+        child.meta["analysis_type"] = analysis_type
+        self._enqueue(child)
+
+        analysis = job.meta.setdefault("analysis", {})
+        analysis[analysis_type] = {"job_id": child.id, "created_at": time.time()}
+        job.meta["analysis"] = analysis
+        self.repo.save(job)
+        self.bus.publish(job.id, {"type": "meta", "meta": job.meta})
+        return child
 
     def _enqueue(self, job: Job) -> Job:
         """Persist a job and put it on the single-worker queue."""
@@ -178,6 +218,17 @@ class TranscriptionService:
                 cancel_event = self._cancel_events.get(job_id) or threading.Event()
                 self._cancel_events[job_id] = cancel_event
 
+            if job.kind == "analysis":
+                run_analysis_job(
+                    job,
+                    settings=self.settings,
+                    repo=self.repo,
+                    bus=self.bus,
+                    client=self._llm_client(),
+                    is_cancelled=cancel_event.is_set,
+                )
+                return
+
             request = job.meta.get("request") or {}
             engine = self._engine_for(request.get("engine") or self.engine_name)
             language = request.get("language") or self.settings.language_or_none()
@@ -209,6 +260,18 @@ class TranscriptionService:
             )
             self._engines[name] = engine
         return engine
+
+    def _llm_client(self) -> LlmClient:
+        """Return (and cache) the LLM client built from settings."""
+        if self._llm is None:
+            self._llm = LlmClient(
+                self.settings.llm_base_url,
+                self.settings.llm_model,
+                api_key=self.settings.llm_api_key,
+                timeout=self.settings.llm_timeout_sec,
+                max_tokens=self.settings.llm_max_tokens,
+            )
+        return self._llm
 
 
 def build_default_service(settings: Settings | None = None) -> TranscriptionService:

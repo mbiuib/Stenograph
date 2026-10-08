@@ -1,5 +1,6 @@
 /** Thin typed wrapper around the backend REST API. */
 import type {
+  AnalysisKind,
   AppConfig,
   EngineList,
   Job,
@@ -42,6 +43,12 @@ export const api = {
     const form = new FormData();
     if (engine) form.append("engine", engine);
     return request<Job>(`/api/jobs/${id}/reprocess`, { method: "POST", body: form });
+  },
+
+  analyzeJob: (id: string, type: AnalysisKind): Promise<Job> => {
+    const form = new FormData();
+    form.append("type", type);
+    return request<Job>(`/api/jobs/${id}/analyze`, { method: "POST", body: form });
   },
 
   deleteJob: async (id: string): Promise<void> => {

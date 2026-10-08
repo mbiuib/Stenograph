@@ -15,6 +15,8 @@ dependencies = [
     # faster-whisper 1.2.x calls av.open(metadata_errors=...), which av 19 removed.
     "av>=14,<19",
     "numpy>=1.26",
+    # OpenAI-compatible chat client for LLM post-processing (LM Studio, Ollama).
+    "httpx>=0.27",
     # WASAPI capture (loopback + microphone) for the live mode; Windows-only.
     "pyaudiowpatch>=0.2.12; sys_platform == 'win32'",
     "nvidia-cublas-cu12>=12.4; sys_platform == 'win32'",

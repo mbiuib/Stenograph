@@ -165,3 +165,25 @@ class FakeCaptureSource(threading.Thread):
                 break
             self._on_chunk(self.track, encoded_chunk(self._start_chunk + step))
             time.sleep(self._interval)
+
+
+# -- LLM doubles ---------------------------------------------------------------
+
+
+class FakeLlm:
+    """Deterministic LlmClient stand-in: records prompts, returns marked text."""
+
+    def __init__(self, *, delay: float = 0.0) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.delay = delay
+
+    def describe(self) -> str:
+        """Target description, like the real client reports it."""
+        return "fake-llm"
+
+    def chat(self, system: str, user: str, *, max_tokens: int | None = None) -> str:
+        """Record the prompt and answer with a marker carrying the call number."""
+        if self.delay:
+            time.sleep(self.delay)
+        self.calls.append((system, user))
+        return f"ответ #{len(self.calls)}"

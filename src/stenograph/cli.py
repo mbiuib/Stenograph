@@ -37,9 +37,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     transcribe.add_argument("--quiet", action="store_true", help="печатать только итоговый текст")
 
+    analyze = subparsers.add_parser(
+        "analyze", help="протокол или резюме завершённой задачи (через локальный LLM)"
+    )
+    analyze.add_argument("job_id", help="id задачи — смотрите в веб-интерфейсе")
+    analyze.add_argument(
+        "--type",
+        choices=("protocol", "summary"),
+        default="protocol",
+        help="что составить: protocol (протокол) или summary (резюме)",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "transcribe":
         return _transcribe(args)
+    if args.command == "analyze":
+        return _analyze(args)
     return 1
 
 
@@ -95,6 +108,52 @@ def _transcribe(args: argparse.Namespace) -> int:
                 return 130
     finally:
         service.bus.unsubscribe(job.id, channel)
+
+
+def _analyze(args: argparse.Namespace) -> int:
+    """Run protocol/summary generation and print the markdown result."""
+    setup_logging(get_settings().log_level)
+    service = build_default_service()
+    job = service.get(args.job_id)
+    if job is None:
+        print(f"задача не найдена: {args.job_id}", file=sys.stderr)
+        return 2
+    try:
+        child = service.request_analysis(job, args.type)
+    except ValueError as exc:
+        print(f"не получилось: {exc}", file=sys.stderr)
+        return 2
+
+    channel = service.bus.subscribe(child.id)
+    try:
+        while True:
+            try:
+                event = channel.get(timeout=1.0)
+            except queue.Empty:
+                current = service.get(child.id)
+                if current and current.status == JobStatus.DONE:
+                    print(current.text)
+                    return 0
+                if current and current.status in (JobStatus.ERROR, JobStatus.CANCELLED):
+                    print(f"ошибка: {current.error or 'отменено'}", file=sys.stderr)
+                    return 1
+                continue
+            etype = event.get("type")
+            if etype in ("status", "progress"):
+                value = event.get("progress", event.get("value", 0))
+                message = event.get("message", "")
+                print(f"[{value:3d}%] {message}", file=sys.stderr)
+            elif etype == "done":
+                print(event["text"])
+                return 0
+            elif etype == "error":
+                print(f"ошибка: {event['message']}", file=sys.stderr)
+                return 1
+            elif etype == "cancelled":
+                print("отменено", file=sys.stderr)
+                return 130
+    finally:
+        service.bus.unsubscribe(child.id, channel)
 
 
 def _check_finished(service: TranscriptionService, job_id: str, quiet: bool) -> int | None:

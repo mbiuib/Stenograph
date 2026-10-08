@@ -25,6 +25,8 @@ from .engines.base import (
     TranscribeProgress,
 )
 from .events import EventBus
+from .llm.analyzer import analyze
+from .llm.client import LlmClient
 from .media import AUDIO_EXTS, extract_audio, probe
 from .storage import JobRepository
 
@@ -34,6 +36,7 @@ PROBE_UNTIL = 2  # progress % reserved for metadata probing
 EXTRACT_UNTIL = 5  # ... and for audio extraction
 ASR_UNTIL = 99  # ASR fills everything up to this
 REPROCESS_UNTIL = 99  # reprocess spreads track progress up to this
+ANALYSIS_UNTIL = 99  # analysis spreads LLM step progress up to this
 
 
 def run_file_job(
@@ -275,6 +278,97 @@ def run_reprocess_job(
 
     except Exception as exc:  # noqa: BLE001 — any failure is reported through the job
         log.exception("reprocess job %s failed", job.id)
+        job.error = f"{type(exc).__name__}: {exc}"
+        job.finished_at = time.time()
+        transition(JobStatus.ERROR, job.error, job.progress)
+        emit({"type": "error", "message": job.error})
+
+
+def run_analysis_job(
+    job: Job,
+    *,
+    settings: Settings,
+    repo: JobRepository,
+    bus: EventBus,
+    client: LlmClient,
+    is_cancelled: Callable[[], bool],
+) -> None:
+    """Generate a protocol or summary for a finished job via the local LLM.
+
+    The child job keeps the markdown result as its ``text``; the parent job
+    gets it back in ``meta.analysis`` so the meeting page can render it
+    without an extra request.
+    """
+
+    def emit(event: dict[str, Any]) -> None:
+        bus.publish(job.id, event)
+
+    def transition(status: JobStatus, message: str, progress: int) -> None:
+        job.status = status
+        job.message = message
+        job.progress = progress
+        repo.save(job)
+        emit({"type": "status", "status": str(status), "message": message, "progress": progress})
+
+    try:
+        job.started_at = time.time()
+        transition(JobStatus.RUNNING, "Подготовка…", 1)
+
+        parent_id = job.meta.get("parent")
+        parent = repo.get(str(parent_id)) if parent_id else None
+        if parent is None:
+            raise ValueError("исходная задача не найдена")
+        analysis_type = str(job.meta.get("analysis_type") or "protocol")
+
+        def on_progress(step: int, total: int, message: str) -> None:
+            value = 2 + int(step / max(total, 1) * (ANALYSIS_UNTIL - 2))
+            job.progress = min(value, ANALYSIS_UNTIL)
+            job.message = message
+            repo.save(job)  # the page polls the API, so chunks must be visible
+            emit({"type": "progress", "value": job.progress, "message": message})
+
+        text, analysis_meta = analyze(
+            parent,
+            analysis_type,
+            client,
+            max_chars=settings.llm_chunk_chars,
+            on_progress=on_progress,
+            is_cancelled=is_cancelled,
+        )
+
+        job.text = text
+        job.meta.update(analysis_meta)
+        job.language = parent.language or job.language
+        job.finished_at = time.time()
+        job.meta["processing_seconds"] = round(
+            job.finished_at - (job.started_at or job.finished_at), 2
+        )
+        transition(JobStatus.DONE, "Готово", 100)
+        emit({"type": "done", "text": text, "meta": job.meta})
+        log.info("analysis job %s done: %d chars (%s)", job.id, len(text), analysis_type)
+
+        analysis = parent.meta.setdefault("analysis", {})
+        entry = analysis.get(analysis_type) or {}
+        entry.update(
+            {
+                "job_id": job.id,
+                "text": text,
+                "model": analysis_meta.get("model"),
+                "finished_at": job.finished_at,
+            }
+        )
+        analysis[analysis_type] = entry
+        parent.meta["analysis"] = analysis
+        repo.save(parent)
+        bus.publish(parent.id, {"type": "meta", "meta": parent.meta})
+
+    except JobCancelled:
+        job.finished_at = time.time()
+        transition(JobStatus.CANCELLED, "Отменено", job.progress)
+        emit({"type": "cancelled"})
+
+    except Exception as exc:  # noqa: BLE001 — any failure is reported through the job
+        log.exception("analysis job %s failed", job.id)
         job.error = f"{type(exc).__name__}: {exc}"
         job.finished_at = time.time()
         transition(JobStatus.ERROR, job.error, job.progress)

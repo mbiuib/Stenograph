@@ -10,6 +10,16 @@ export interface Segment {
   speaker: string | null;
 }
 
+export type AnalysisKind = "protocol" | "summary";
+
+export interface AnalysisEntry {
+  job_id: string;
+  text?: string;
+  model?: string;
+  created_at?: number;
+  finished_at?: number;
+}
+
 export interface JobMeta {
   duration?: number;
   language?: string;
@@ -26,6 +36,11 @@ export interface JobMeta {
   tracks?: string[];
   audio?: Record<string, string>;
   track_durations?: Record<string, number>;
+  analysis?: Partial<Record<AnalysisKind, AnalysisEntry>>;
+  analysis_type?: AnalysisKind;
+  chunks?: number;
+  transcript_chars?: number;
+  model?: string;
   [key: string]: unknown;
 }
 
@@ -89,6 +104,7 @@ export interface AppConfig {
   device: string;
   compute_type: string;
   models_dir: string | null;
+  llm?: { model: string; base_url: string };
 }
 
 export interface LiveStatus {
