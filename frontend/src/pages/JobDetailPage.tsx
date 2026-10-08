@@ -35,6 +35,8 @@ export function JobDetailPage() {
   const { data: appConfig } = usePolling(() => api.config(), 120000);
   const [reprocessBusy, setReprocessBusy] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
 
   const [analysisText, setAnalysisText] = useState<Partial<Record<AnalysisKind, string>>>({});
@@ -180,6 +182,17 @@ export function JobDetailPage() {
       setReprocessBusy(false);
     }
   };
+  const retry = async () => {
+    setRetryBusy(true);
+    setRetryError(null);
+    try {
+      const next = await api.retryJob(job.id);
+      navigate(`/jobs/${next.id}`);
+    } catch (err) {
+      setRetryError(`Не удалось запустить повторную обработку: ${(err as Error).message}`);
+      setRetryBusy(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -215,6 +228,14 @@ export function JobDetailPage() {
                 </Link>
               </Chip>
             )}
+            {job.meta.retry_of != null && <Chip>повторная обработка</Chip>}
+            {job.meta.retry_of != null && (
+              <Chip>
+                <Link to={`/jobs/${job.meta.retry_of}`} className="hover:text-accent">
+                  ← первая обработка
+                </Link>
+              </Chip>
+            )}
             {job.kind === "analysis" && <Chip>анализ</Chip>}
             {job.kind === "analysis" && job.meta.parent != null && (
               <Chip>
@@ -234,6 +255,16 @@ export function JobDetailPage() {
             >
               <IconRefresh className="size-4" />
               {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
+            </button>
+          )}
+          {!live && job.kind === "file" && job.status !== "running" && job.status !== "queued" && (
+            <button
+              onClick={() => void retry()}
+              disabled={retryBusy}
+              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconRefresh className="size-4" />
+              {retryBusy ? "Запускаем…" : "Обработать заново"}
             </button>
           )}
           {live && job.kind === "live" && (
@@ -289,6 +320,7 @@ export function JobDetailPage() {
 
       {job.status === "error" && job.error && <ErrorBanner message={job.error} />}
       {reprocessError && <ErrorBanner message={reprocessError} />}
+      {retryError && <ErrorBanner message={retryError} />}
 
       {job.status === "done" && (
         <div className="flex flex-wrap items-center gap-2">

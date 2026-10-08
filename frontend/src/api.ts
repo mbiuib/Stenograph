@@ -45,6 +45,9 @@ export const api = {
     return request<Job>(`/api/jobs/${id}/reprocess`, { method: "POST", body: form });
   },
 
+  retryJob: (id: string): Promise<Job> =>
+    request<Job>(`/api/jobs/${id}/retry`, { method: "POST" }),
+
   analyzeJob: (id: string, type: AnalysisKind): Promise<Job> => {
     const form = new FormData();
     form.append("type", type);

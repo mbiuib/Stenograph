@@ -116,6 +116,36 @@ class TranscriptionService:
         self.bus.publish(live_job.id, {"type": "meta", "meta": live_job.meta})
         return job
 
+    def retry_file_job(
+        self, job: Job, *, engine: str | None = None, language: str | None = None
+    ) -> Job:
+        """Queue the same uploaded file for a fresh transcription run.
+
+        Any finished file job (done, error, cancelled) can be retried; the
+        original request options are reused unless overridden. A new job is
+        created so the failed attempt stays visible in the history.
+        """
+        if job.kind != "file":
+            raise ValueError("перезапустить можно только файловую задачу")
+        if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+            raise ValueError("задача ещё выполняется — дождитесь её завершения")
+        source = Path(job.source_path or "")
+        if not source.is_file():
+            raise ValueError("исходный файл больше недоступен в хранилище")
+
+        request = job.meta.get("request") or {}
+        new_job = Job(
+            kind="file",
+            source_name=job.source_name,
+            source_path=str(source),
+        )
+        new_job.meta["request"] = {
+            "language": language if language is not None else request.get("language"),
+            "engine": engine if engine is not None else request.get("engine"),
+        }
+        new_job.meta["retry_of"] = job.id
+        return self._enqueue(new_job)
+
     def request_analysis(self, job: Job, analysis_type: str) -> Job:
         """Queue protocol/summary generation for a finished job.
 

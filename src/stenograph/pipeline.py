@@ -81,7 +81,11 @@ def run_file_job(
         if source.suffix.lower() not in AUDIO_EXTS:
             transition(JobStatus.RUNNING, "Извлечение аудиодорожки…", PROBE_UNTIL + 1)
             audio_path = settings.work_dir / f"{job.id}.wav"
-            extract_audio(source, audio_path, settings)
+            try:
+                extract_audio(source, audio_path, settings)
+            except ValueError as exc:
+                # Name the user's file, not the uuid copy on disk.
+                raise ValueError(str(exc).replace(source.name, job.source_name)) from exc
 
         transition(JobStatus.RUNNING, "Транскрибация…", EXTRACT_UNTIL)
 

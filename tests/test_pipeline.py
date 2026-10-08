@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from fakes import FakeEngine
 from stenograph.config import Settings
 from stenograph.domain.errors import JobCancelled
@@ -16,6 +18,40 @@ def _settings(tmp_path: Path) -> Settings:
     settings = Settings(data_dir=tmp_path / "data")
     settings.ensure_dirs()
     return settings
+
+
+def test_pipeline_replaces_storage_name_in_read_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read error names the user's file, not the uuid copy on disk."""
+    settings = _settings(tmp_path)
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    source = tmp_path / "85c7e83a5d31445bbfdc7f9da29fb695.pdf"
+    source.write_bytes(b"%PDF-1.4 fake")
+    job = Job(source_name="Стандартная запись 3.pdf", source_path=str(source))
+    repo.save(job)
+
+    def fake_extract(src: Path, dst: Path, st: Settings) -> None:
+        raise ValueError(
+            f"не удалось прочитать файл «{Path(src).name}»: это не аудио/видео или он повреждён"
+        )
+
+    monkeypatch.setattr("stenograph.pipeline.extract_audio", fake_extract)
+
+    run_file_job(
+        job,
+        settings=settings,
+        repo=repo,
+        bus=bus,
+        engine=FakeEngine(),
+        options=TranscribeOptions(),
+        is_cancelled=lambda: False,
+    )
+
+    assert job.status == JobStatus.ERROR
+    assert "Стандартная запись 3.pdf" in (job.error or "")
+    assert "85c7e83a" not in (job.error or "")
 
 
 def test_pipeline_runs_to_completion(tmp_path: Path) -> None:

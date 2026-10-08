@@ -144,6 +144,27 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return child.model_dump()
 
+    @app.post("/api/jobs/{job_id}/retry", status_code=201)
+    def retry_job(
+        job_id: str,
+        engine: str | None = Form(default=None),
+        language: str | None = Form(default=None),
+    ) -> dict:
+        """Queue the same uploaded file again (after an error or any finished run)."""
+        job = service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if engine is not None and engine not in available_asr():
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown engine '{engine}'; available: {', '.join(available_asr())}",
+            )
+        try:
+            new_job = service.retry_file_job(job, engine=engine, language=language)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return new_job.model_dump()
+
     @app.post("/api/jobs/{job_id}/analyze", status_code=201)
     def analyze_job(
         job_id: str, analysis_type: str = Form(alias="type", default="protocol")
