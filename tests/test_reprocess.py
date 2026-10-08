@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from stenograph.api.app import create_app
 from stenograph.config import Settings
 from stenograph.domain.models import Job, JobStatus, Segment
-from stenograph.engines.base import AsrResult, TranscribeOptions, TranscribeProgress
+from stenograph.engines.base import AsrResult, NoSpeechError, TranscribeOptions, TranscribeProgress
 from stenograph.events import EventBus
 from stenograph.pipeline import run_reprocess_job
 from stenograph.service import TranscriptionService
@@ -218,3 +218,100 @@ def test_api_reprocess_endpoint(tmp_path: Path) -> None:
     assert payload["status"] == "done", payload
     assert payload["meta"]["parent"] == live.id
     assert len(payload["segments"]) == 4
+
+
+class TrackSelectiveFakeEngine:
+    """Engine double: the system track has no speech, the mic track does."""
+
+    name = "fake-partial"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        options: TranscribeOptions,
+        *,
+        on_progress=None,
+        on_segment=None,
+        is_cancelled=None,
+    ) -> AsrResult:
+        """Raise NoSpeechError for system.wav, return one segment otherwise."""
+        name = Path(audio_path).name
+        self.calls.append(name)
+        if name.startswith("system"):
+            raise NoSpeechError("речи нет (тест)")
+        segment = Segment(index=0, start=0.0, end=2.0, text="речь в микрофон")
+        if on_segment:
+            on_segment(segment)
+        return AsrResult(language="ru", duration=10.0, segments=[segment])
+
+
+class TotallySilentFakeEngine:
+    """Engine double: no track contains speech."""
+
+    name = "fake-silent"
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        options: TranscribeOptions,
+        *,
+        on_progress=None,
+        on_segment=None,
+        is_cancelled=None,
+    ) -> AsrResult:
+        """Always report the absence of speech."""
+        raise NoSpeechError("речи нет (тест)")
+
+
+def test_reprocess_skips_speechless_track(tmp_path: Path) -> None:
+    """A silent system track is skipped; the mic track still lands in the result."""
+    settings = _settings(tmp_path)
+    repo = JobRepository(settings.db_path)
+    job = _live_job_with_audio(tmp_path)
+    job.meta["tracks"] = ["system", "mic"]
+    repo.save(job)
+    engine = TrackSelectiveFakeEngine()
+
+    run_reprocess_job(
+        job,
+        settings=settings,
+        repo=repo,
+        bus=EventBus(),
+        engine=engine,
+        options=TranscribeOptions(),
+        is_cancelled=lambda: False,
+    )
+
+    assert job.status == JobStatus.DONE, job.error
+    assert engine.calls == ["system.wav", "mic.wav"]  # the mic track was reached
+    assert [s.text for s in job.segments] == ["речь в микрофон"]
+    assert job.segments[0].speaker == "Вы"
+    assert job.meta["speechless_tracks"] == ["system"]
+    assert "no_speech" not in job.meta
+
+
+def test_reprocess_all_tracks_speechless_is_done(tmp_path: Path) -> None:
+    """No speech anywhere completes as done («Речь не обнаружена»), not an error."""
+    settings = _settings(tmp_path)
+    repo = JobRepository(settings.db_path)
+    job = _live_job_with_audio(tmp_path)
+    repo.save(job)
+
+    run_reprocess_job(
+        job,
+        settings=settings,
+        repo=repo,
+        bus=EventBus(),
+        engine=TotallySilentFakeEngine(),
+        options=TranscribeOptions(),
+        is_cancelled=lambda: False,
+    )
+
+    assert job.status == JobStatus.DONE, job.error
+    assert job.segments == []
+    assert job.meta["no_speech"] is True
+    assert job.message == "Речь не обнаружена"
+    assert (job.text or "") == ""

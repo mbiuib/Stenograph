@@ -30,6 +30,7 @@ from ..domain.models import Segment
 from .base import (
     AsrResult,
     CancelCallback,
+    NoSpeechError,
     ProgressCallback,
     SegmentCallback,
     TranscribeOptions,
@@ -362,7 +363,7 @@ class MossEngine:
             item["index"] = index
 
         if not all_segments:
-            raise RuntimeError("MOSS вернул пустой результат")
+            raise NoSpeechError("MOSS не обнаружил речи в аудио")
 
         return AsrResult(
             language=options.language or "auto",

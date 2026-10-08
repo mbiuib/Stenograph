@@ -44,6 +44,14 @@ class AsrResult:
     segments: list[Segment] = field(default_factory=list)
 
 
+class NoSpeechError(RuntimeError):
+    """The engine found no recognizable speech in the audio.
+
+    An empty result on silent or music-only input is a legitimate outcome,
+    not a failure; callers decide whether to skip the input or surface it.
+    """
+
+
 ProgressCallback = Callable[[TranscribeProgress], None]
 SegmentCallback = Callable[[Segment], None]
 CancelCallback = Callable[[], bool]

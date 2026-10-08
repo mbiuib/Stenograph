@@ -19,6 +19,8 @@ from .domain.errors import JobCancelled
 from .domain.models import Job, JobStatus, Segment
 from .engines.base import (
     AsrEngine,
+    AsrResult,
+    NoSpeechError,
     ProgressCallback,
     SegmentCallback,
     TranscribeOptions,
@@ -95,13 +97,17 @@ def run_file_job(
             streamed += 1
             emit({"type": "segment", "segment": segment.model_dump()})
 
-        result = engine.transcribe(
-            audio_path,
-            options,
-            on_progress=on_progress,
-            on_segment=on_segment,
-            is_cancelled=is_cancelled,
-        )
+        try:
+            result = engine.transcribe(
+                audio_path,
+                options,
+                on_progress=on_progress,
+                on_segment=on_segment,
+                is_cancelled=is_cancelled,
+            )
+        except NoSpeechError:
+            # Пустой результат на тишине — честный исход, а не сбой.
+            result = AsrResult(duration=float(job.meta.get("duration") or 0.0))
 
         job.language = result.language or job.language
         speakers = sorted({s.speaker for s in result.segments if s.speaker})
@@ -115,6 +121,8 @@ def run_file_job(
                 "diarized": bool(speakers),
             }
         )
+        if not result.segments:
+            job.meta["no_speech"] = True
         if len(result.segments) != streamed:
             # Long segments were re-split: the UI must replace what it streamed.
             emit(
@@ -130,7 +138,7 @@ def run_file_job(
         job.meta["processing_seconds"] = round(
             job.finished_at - (job.started_at or job.finished_at), 2
         )
-        transition(JobStatus.DONE, "Готово", 100)
+        transition(JobStatus.DONE, "Готово" if result.segments else "Речь не обнаружена", 100)
         emit({"type": "done", "text": job.text, "meta": job.meta})
         log.info(
             "job %s done: %d segments, %.1f s audio", job.id, len(job.segments), result.duration
@@ -167,7 +175,9 @@ def run_reprocess_job(
     Offline improvement pass of a live session: every recorded track is run
     through the engine from scratch (moss by default); microphone segments are
     labelled «Вы», diarized system-track speakers keep their engine labels.
-    Segments of all tracks are merged into one timeline.
+    Segments of all tracks are merged into one timeline. Tracks without speech
+    are skipped; a recording with no speech at all completes with an empty
+    transcript instead of failing.
     """
 
     def emit(event: dict[str, Any]) -> None:
@@ -191,6 +201,7 @@ def run_reprocess_job(
 
         gathered: list[Segment] = []
         durations: dict[str, float] = {}
+        speechless: list[str] = []
         language = ""
         span = (REPROCESS_UNTIL - 1) / len(tracks)
 
@@ -222,13 +233,19 @@ def run_reprocess_job(
                 JobStatus.RUNNING, f"Дорожка {index + 1}/{len(tracks)}: {label}…", int(base)
             )
             on_progress, on_segment = make_callbacks(track, index, base)
-            result = engine.transcribe(
-                path,
-                options,
-                on_progress=on_progress,
-                on_segment=on_segment,
-                is_cancelled=is_cancelled,
-            )
+            try:
+                result = engine.transcribe(
+                    path,
+                    options,
+                    on_progress=on_progress,
+                    on_segment=on_segment,
+                    is_cancelled=is_cancelled,
+                )
+            except NoSpeechError:
+                # Безречевая дорожка (тишина, музыка без речи) — не сбой.
+                speechless.append(track)
+                log.info("reprocess %s: track %s has no speech, skipped", job.id, track)
+                continue
             durations[track] = result.duration
             language = language or result.language
             for segment in result.segments:
@@ -251,6 +268,10 @@ def run_reprocess_job(
                 "diarized": bool(speakers),
             }
         )
+        if speechless:
+            job.meta["speechless_tracks"] = speechless
+        if not merged:
+            job.meta["no_speech"] = True
         emit({"type": "segments_replaced", "segments": [item.model_dump() for item in merged]})
         job.segments = merged
         job.text = "\n".join(
@@ -262,7 +283,7 @@ def run_reprocess_job(
         job.meta["processing_seconds"] = round(
             job.finished_at - (job.started_at or job.finished_at), 2
         )
-        transition(JobStatus.DONE, "Готово", 100)
+        transition(JobStatus.DONE, "Готово" if merged else "Речь не обнаружена", 100)
         emit({"type": "done", "text": job.text, "meta": job.meta})
         log.info(
             "reprocess job %s done: %d segments from %d track(s)",
