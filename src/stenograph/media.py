@@ -18,6 +18,13 @@ log = logging.getLogger(__name__)
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv", ".ts", ".mts"}
 
+# FFmpeg messages that mean "this is not a media file at all, or it is corrupt".
+_UNREADABLE_MARKERS = (
+    "Invalid data found when processing input",
+    "moov atom not found",
+    "EBML header parsing failed",
+)
+
 
 def probe(path: Path, settings: Settings) -> dict:
     """Return basic media metadata via ffprobe; an empty dict when unavailable."""
@@ -51,7 +58,14 @@ def extract_audio(source: Path, target: Path, settings: Settings) -> None:
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=3600, check=True)
     except subprocess.CalledProcessError as exc:
-        tail = " / ".join((exc.stderr or "").strip().splitlines()[-3:])
+        stderr = (exc.stderr or "").strip()
+        if any(marker in stderr for marker in _UNREADABLE_MARKERS):
+            # A PDF or a truncated download: tell the user what is wrong,
+            # not the raw decoder dump.
+            raise ValueError(
+                f"не удалось прочитать файл «{source.name}»: это не аудио/видео или он повреждён"
+            ) from exc
+        tail = " / ".join(stderr.splitlines()[-3:])
         raise RuntimeError(f"ffmpeg failed: {tail}") from exc
     except OSError as exc:
         raise RuntimeError(f"ffmpeg not available: {exc}") from exc
