@@ -23,6 +23,7 @@ SAMPLE_RATE = 16000
 
 WindowWord = tuple[float, float, str]  # (start, end, text), seconds from window start
 WindowTranscriber = Callable[[np.ndarray], list[WindowWord]]
+BatchWindowTranscriber = Callable[[list[np.ndarray]], list[list[WindowWord]]]
 FinalCallback = Callable[[float, float, str], None]  # (start, end, text) absolute
 PartialCallback = Callable[[str], None]
 
@@ -73,6 +74,7 @@ class StreamTracker:
         self._buffer = np.zeros(0, dtype=np.float32)
         self._buffer_start = 0.0  # session time (seconds) of buffer[0]
         self._run_mark = 0.0  # buffer seconds already covered by an inference
+        self._pending_cover_abs = 0.0  # end of the audio covered by the taken window
         self._prev: list[WindowWord] = []
 
     # -- input ---------------------------------------------------------------
@@ -100,13 +102,39 @@ class StreamTracker:
 
     def tick(self) -> bool:
         """Run one inference step if enough new audio is buffered."""
-        if not self.ready():
+        window = self.pending_window()
+        if window is None:
             return False
+        self.apply_words(list(self._transcribe(window)))
+        return True
+
+    def pending_window(self, *, cap_sec: float | None = None) -> np.ndarray | None:
+        """Snapshot the window ready for inference (None when idle or silent).
+
+        Used by the batched decode pass: the returned audio goes to the
+        engine and the hypothesis comes back through :meth:`apply_words`.
+        Tracker state is untouched here — the decode thread is the only
+        writer, so the window stays self-consistent while the batch runs.
+
+        ``cap_sec`` bounds how much audio one step processes (the batched pass
+        uses it so a lagging window cannot grow without bound); the remainder
+        stays buffered, and :meth:`apply_words` marks only the covered prefix.
+        """
+        if not self.ready():
+            return None
         if self._buffer.size and _rms(self._buffer) < self._min_rms:
             self._drop_silence()
-            return False
+            return None
+        cover = self.buffer_seconds
+        window = self._buffer
+        if cap_sec is not None and cover > cap_sec:
+            cover = cap_sec
+            window = self._buffer[: int(cap_sec * self._rate)]
+        self._pending_cover_abs = self._buffer_start + cover
+        return window
 
-        words = list(self._transcribe(self._buffer))
+    def apply_words(self, words: list[WindowWord]) -> None:
+        """Commit a hypothesis for the window returned by :meth:`pending_window`."""
         agree = _common_prefix_len(self._prev, words)
         finals: list[tuple[float, float, str]] = []
         partial = ""
@@ -128,9 +156,10 @@ class StreamTracker:
             self._prev = list(words)
             partial = " ".join(word[2] for word in words)
 
-        self._run_mark = self.buffer_seconds
+        self._run_mark = max(0.0, self._pending_cover_abs - self._buffer_start)
+        covered = self._run_mark
 
-        if self.buffer_seconds >= self._max_window_sec and self._prev:
+        if covered >= self._max_window_sec and self._prev:
             finals.append(
                 (
                     self._buffer_start + self._prev[0][0],
@@ -139,13 +168,50 @@ class StreamTracker:
                 )
             )
             self._prev = []
-            self._drop_before(self._buffer_start + self.buffer_seconds)
+            self._drop_before(self._buffer_start + covered)
             partial = ""
 
         for start, end, text in finals:
             self._on_final(start, end, text)
         self._on_partial(partial)
-        return True
+
+    def apply_window(self, words: list[WindowWord], *, hold_sec: float = 0.5) -> None:
+        """Commit one batched window in a single pass, holding its trailing edge.
+
+        A batched window is cut at the cap (often mid-speech), so its last
+        words are the least reliable decode; holding them keeps the hard edge
+        out of the final text — the held audio stays buffered and returns as
+        the leading context of a later window, where it decodes cleanly.
+        Unlike LocalAgreement this needs no second hypothesis of the same
+        span, so one round advances the stream by roughly ``cap − hold``.
+        """
+        cover = max(0.0, self._pending_cover_abs - self._buffer_start)
+        commit_end = max(0.0, cover - hold_sec)
+        stable: list[WindowWord] = []
+        for word in words:
+            if word[1] > commit_end:
+                break
+            stable.append(word)
+
+        finals: list[tuple[float, float, str]] = []
+        base = 0.0
+        if stable:
+            finals.append(
+                (
+                    self._buffer_start + stable[0][0],
+                    self._buffer_start + stable[-1][1],
+                    " ".join(word[2] for word in stable),
+                )
+            )
+            base = stable[-1][1]
+            self._drop_before(self._buffer_start + base)
+
+        held = [(s - base, e - base, t) for s, e, t in words[len(stable):]]
+        self._prev = held
+        self._run_mark = max(0.0, self._pending_cover_abs - self._buffer_start)
+        for start, end, text in finals:
+            self._on_final(start, end, text)
+        self._on_partial(" ".join(word[2] for word in held))
 
     def flush(self) -> None:
         """Commit whatever is buffered (session stop); always clears the window."""

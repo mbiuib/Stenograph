@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # backlogged recording cannot starve the others).
     live_turn_ticks: int = 6  # max whisper steps per session per turn
     live_turn_sec: float = 2.0  # max wall-clock seconds of GPU work per turn
+    live_batch_max: int = 20  # windows merged into one batched engine pass
+    live_batch_window_sec: float = 5.0  # per-window audio cap inside one pass
+    live_batch_hold_sec: float = 0.5  # trailing edge kept for the next window
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

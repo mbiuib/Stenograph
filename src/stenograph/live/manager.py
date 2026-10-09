@@ -33,11 +33,18 @@ from ..events import EventBus
 from ..naming import timestamped
 from ..storage import JobRepository
 from . import capture as capture_module
-from .streamer import SAMPLE_RATE, StreamTracker, WindowTranscriber, WindowWord
+from .streamer import (
+    SAMPLE_RATE,
+    BatchWindowTranscriber,
+    StreamTracker,
+    WindowTranscriber,
+    WindowWord,
+)
 
 log = logging.getLogger(__name__)
 
 TranscriberFactory = Callable[[str | None], WindowTranscriber]
+BatchTranscriberFactory = Callable[[str | None], BatchWindowTranscriber]
 CaptureFactory = Callable[..., capture_module.AudioSource]
 
 DEFAULT_TRACKS: tuple[str, ...] = ("system", "mic")
@@ -45,7 +52,9 @@ FINALIZE_WAIT_SEC = 30.0  # how long stop_session waits for the queue to finaliz
 IDLE_SLEEP_SEC = 0.15  # decode loop idle poll (same cadence as the old per-session pump)
 
 
-_ENGINE_FACTORIES: dict[tuple[str, str, str, str], TranscriberFactory] = {}
+_ENGINE_FACTORIES: dict[
+    tuple[str, str, str, str], tuple[TranscriberFactory, BatchTranscriberFactory]
+] = {}
 _ENGINE_FACTORIES_LOCK = threading.Lock()
 
 
@@ -56,6 +65,16 @@ def default_transcriber_factory(settings: Settings) -> TranscriberFactory:
     calls are serialized with an engine lock so concurrent tracks cannot race
     the model.
     """
+    return _engine_bundle(settings)[0]
+
+
+def default_batch_transcriber_factory(settings: Settings) -> BatchTranscriberFactory:
+    """Batched flavour of the same engine instance (one lock, one model)."""
+    return _engine_bundle(settings)[1]
+
+
+def _engine_bundle(settings: Settings) -> tuple[TranscriberFactory, BatchTranscriberFactory]:
+    """Return (window, batch) factories bound to one lazily loaded engine."""
     key = (
         settings.live_model,
         str(settings.models_dir or ""),
@@ -63,19 +82,21 @@ def default_transcriber_factory(settings: Settings) -> TranscriberFactory:
         settings.compute_type,
     )
     with _ENGINE_FACTORIES_LOCK:
-        factory = _ENGINE_FACTORIES.get(key)
-        if factory is None:
-            factory = _build_transcriber_factory(settings)
-            _ENGINE_FACTORIES[key] = factory
-        return factory
+        bundle = _ENGINE_FACTORIES.get(key)
+        if bundle is None:
+            bundle = _build_engine_bundle(settings)
+            _ENGINE_FACTORIES[key] = bundle
+        return bundle
 
 
-def _build_transcriber_factory(settings: Settings) -> TranscriberFactory:
-    """Create a factory bound to one lazily loaded whisper engine."""
+def _build_engine_bundle(
+    settings: Settings,
+) -> tuple[TranscriberFactory, BatchTranscriberFactory]:
+    """Create window and batch factories sharing one engine and one lock."""
     holder: dict[str, Any] = {}
     engine_lock = threading.Lock()
 
-    def factory(language: str | None) -> WindowTranscriber:
+    def get_engine() -> Any:
         engine = holder.get("engine")
         if engine is None:
             from ..engines.whisper import FasterWhisperEngine
@@ -87,14 +108,23 @@ def _build_transcriber_factory(settings: Settings) -> TranscriberFactory:
                 compute_type=settings.compute_type,
             )
             holder["engine"] = engine
+        return engine
 
+    def factory(language: str | None) -> WindowTranscriber:
         def transcribe(audio: np.ndarray) -> list[WindowWord]:
             with engine_lock:
-                return engine.transcribe_window(audio, language=language, beam_size=1)
+                return get_engine().transcribe_window(audio, language=language, beam_size=1)
 
         return transcribe
 
-    return factory
+    def batch_factory(language: str | None) -> BatchWindowTranscriber:
+        def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
+            with engine_lock:
+                return get_engine().transcribe_batch(windows, language=language)
+
+        return transcribe
+
+    return factory, batch_factory
 
 
 class LiveManager:
@@ -107,6 +137,7 @@ class LiveManager:
         bus: EventBus,
         *,
         transcriber_factory: TranscriberFactory | None = None,
+        batch_factory: BatchTranscriberFactory | None = None,
         capture_factory: CaptureFactory | None = None,
         reprocess: Callable[[Job], Job | None] | None = None,
         auto_reprocess: bool = False,
@@ -114,7 +145,12 @@ class LiveManager:
         self._settings = settings
         self._repo = repo
         self._bus = bus
-        self._transcriber_factory = transcriber_factory or default_transcriber_factory(settings)
+        if transcriber_factory is None:
+            transcriber_factory, default_batch = _engine_bundle(settings)
+            if batch_factory is None:
+                batch_factory = default_batch
+        self._transcriber_factory = transcriber_factory
+        self._batch_factory = batch_factory
         self._capture_factory = capture_factory or capture_module.open_source
         self._reprocess = reprocess
         self._auto_reprocess = auto_reprocess
@@ -122,6 +158,7 @@ class LiveManager:
         self._turn: deque[str] = deque()  # sessions waiting for a transcription turn (FIFO)
         self._queued: set[str] = set()  # turn-queue membership, for O(1) dedupe
         self._serving_id: str | None = None  # session the decoder works on right now
+        self._serving_ids: set[str] = set()  # batched round: sessions in one pass
         self._server_session_id: str | None = None  # the single WASAPI capture session
         self._lock = threading.Lock()
         self._decoder = threading.Thread(
@@ -141,6 +178,7 @@ class LiveManager:
         with self._lock:
             sessions = list(self._sessions.values())
             serving = self._serving_id
+            serving_ids = set(self._serving_ids)
             waiting = list(self._turn)
         items = []
         for session in sessions:
@@ -154,7 +192,7 @@ class LiveManager:
                     "started_at": session.job.started_at,
                     "lag_sec": session.lag_seconds(),
                     "text_delay_sec": session.text_delay_seconds(),
-                    "transcribing": session.job.id == serving,
+                    "transcribing": session.job.id == serving or session.job.id in serving_ids,
                     "queue_position": position,
                 }
             )
@@ -309,7 +347,10 @@ class LiveManager:
         while True:
             served = False
             try:
-                served = self._serve_next()
+                if self._batch_factory is not None:
+                    served = self._serve_batch_round()
+                else:
+                    served = self._serve_next()
             except Exception:  # noqa: BLE001 — the loop must survive any session bug
                 log.exception("live-декодер: непредвиденная ошибка")
             try:
@@ -361,6 +402,115 @@ class LiveManager:
         if finished and session is not None:
             self._chain_reprocess(session)
             session.notify_finished()
+        return True
+
+    def _serve_batch_round(self) -> bool:
+        """Batched turn: one window per queued session, one pass per language.
+
+        Short windows spend almost all of their cost on fixed per-inference
+        overhead; packing the ready windows of several sessions into one
+        engine call amortises it. Sessions without a ready window only run
+        their stop/finalize checks and go back to waiting.
+        """
+        batch_factory = self._batch_factory
+        if batch_factory is None:  # defence in depth: the loop gates on this
+            return False
+        round_started = time.monotonic()
+        with self._lock:
+            self._refresh_turns()
+            if not self._turn:
+                return False
+            picked: list[tuple[str, _LiveSession]] = []
+            while self._turn and len(picked) < self._settings.live_batch_max:
+                job_id = self._turn.popleft()
+                self._queued.discard(job_id)
+                session = self._sessions.get(job_id)
+                if session is not None:
+                    picked.append((job_id, session))
+        if not picked:
+            return False
+        picked_at = time.monotonic()
+
+        session_by_id = dict(picked)
+        by_language: dict[str | None, list[tuple[str, str, np.ndarray]]] = {}
+        for job_id, session in picked:
+            window = session.begin_batch_window(cap_sec=self._settings.live_batch_window_sec)
+            if window is None:
+                continue
+            track, audio = window
+            by_language.setdefault(session.job.language, []).append((job_id, track, audio))
+
+        collected_at = time.monotonic()
+        engine_done = collected_at
+        rows_total = 0
+
+        if by_language:
+            with self._lock:
+                self._serving_ids = {
+                    job_id for group in by_language.values() for job_id, _, _ in group
+                }
+            try:
+                for language, group in by_language.items():
+                    transcriber = batch_factory(language)
+                    outputs = transcriber([audio for _, _, audio in group])
+                    rows_total += len(group)
+                    if len(outputs) != len(group):
+                        raise RuntimeError("батч-инференс вернул неверное число результатов")
+                    for (job_id, track, _audio), words in zip(group, outputs, strict=True):
+                        session = session_by_id.get(job_id)
+                        if session is not None:
+                            session.end_batch_window(track, words)
+            except Exception:  # noqa: BLE001 — keep sessions alive, retry next round
+                log.exception("live-декодер: батч-инференс упал")
+            finally:
+                engine_done = time.monotonic()
+                with self._lock:
+                    self._serving_ids = set()
+
+        taken_ids = {job_id for group in by_language.values() for job_id, _, _ in group}
+        for job_id, session in picked:
+            if job_id in taken_ids:
+                continue
+            try:
+                session.end_batch_window(None, None)
+            except Exception:  # noqa: BLE001 — one broken session must not stop the rest
+                log.exception("live-декодер: сессия %s упала на пустом ходе", job_id)
+                session.fail("внутренняя ошибка транскрибации")
+
+        finished: list[_LiveSession] = []
+        with self._lock:
+            for job_id, session in picked:
+                if session.finished:
+                    if self._sessions.get(job_id) is session:
+                        self._sessions.pop(job_id, None)
+                    if self._server_session_id == job_id:
+                        self._server_session_id = None
+                    finished.append(session)
+                elif (
+                    session.needs_turn()
+                    and self._sessions.get(job_id) is session
+                    and job_id not in self._queued
+                ):
+                    self._queued.add(job_id)
+                    self._turn.append(job_id)
+        for session in finished:
+            self._chain_reprocess(session)
+            session.notify_finished()
+        if by_language:
+            round_total = time.monotonic() - round_started
+            budget = self._settings.live_batch_window_sec - self._settings.live_batch_hold_sec
+            if round_total > budget:
+                log.warning(
+                    "батч-раунд: %d окон за %.2f с (сбор %.2f, инференс %.2f, "
+                    "применение %.2f) — декодер не успевает за эфиром",
+                    rows_total,
+                    round_total,
+                    collected_at - picked_at,
+                    engine_done - collected_at,
+                    time.monotonic() - engine_done,
+                )
+            else:
+                log.debug("батч-раунд: %d окон за %.2f с", rows_total, round_total)
         return True
 
     def _refresh_turns(self) -> None:
@@ -428,6 +578,7 @@ class _LiveSession:
         self._started_monotonic = time.monotonic()
         self._levels_emitted_at = 0.0
         self._chunks_written = 0
+        self._batch_lag_before = 0.0
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -552,6 +703,40 @@ class _LiveSession:
             # the window cannot be drained by inference (the RMS gate skips it,
             # and it is too short to trigger the silence drop) — flushing
             # handles it safely instead of waiting forever.
+            self._finalize()
+            return False
+        return self.needs_turn()
+
+    # -- batched decode (decode worker thread) --------------------------------
+
+    def begin_batch_window(self, *, cap_sec: float | None = None) -> tuple[str, np.ndarray] | None:
+        """Feed buffered chunks and snapshot one ready window (decode worker).
+
+        The window is handed to the manager's batched engine pass; the
+        hypothesis returns through :meth:`end_batch_window`. ``cap_sec``
+        bounds the window so a lagging session cannot blow up the batch.
+        """
+        self._feed_pending()
+        self._batch_lag_before = self._total_lag()
+        for track, tracker in self._trackers.items():
+            audio = tracker.pending_window(cap_sec=cap_sec)
+            if audio is not None:
+                return track, audio
+        return None
+
+    def end_batch_window(self, track: str | None, words: list[WindowWord] | None) -> bool:
+        """Apply a batched hypothesis (or just a stop check) for this session."""
+        lag_before = self._batch_lag_before
+        if track is not None and words is not None:
+            tracker = self._trackers.get(track)
+            if tracker is not None:
+                tracker.apply_window(
+                    list(words), hold_sec=self._settings.live_batch_hold_sec
+                )
+        lag_after = self._total_lag()
+        if self._stop_requested.is_set() and (lag_after == 0.0 or lag_after >= lag_before):
+            # Same contract as ``serve``: a stopped session with nothing left
+            # (or no progress) finalizes instead of waiting forever.
             self._finalize()
             return False
         return self.needs_turn()
