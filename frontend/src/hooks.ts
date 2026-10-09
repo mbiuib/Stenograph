@@ -1,6 +1,7 @@
 /** React hooks: polling, live job stream, ticking clock. */
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { ownsLiveJob, subscribeLiveEvents } from "./live/session";
 import type { Job, JobEvent, Segment } from "./types";
 
 /** Poll an async function on an interval; errors are surfaced, data is retained.
@@ -145,6 +146,21 @@ export function useJobStream(jobId: string | undefined): {
       }
     };
 
+    // A recording tab receives this job's events over its capture WebSocket;
+    // an EventSource would take one of Chrome's six HTTP/1.1 sockets per host
+    // and stall every further request (status polls included) once several
+    // tabs record at once. Subscribe first, buffer until the snapshot lands.
+    let ready = false;
+    const pending: JobEvent[] = [];
+    let unsubscribe: (() => void) | null = null;
+    if (ownsLiveJob(jobId)) {
+      unsubscribe = subscribeLiveEvents((event) => {
+        if (!alive) return;
+        if (ready) apply(event);
+        else pending.push(event);
+      });
+    }
+
     void api
       .getJob(jobId)
       .then((initial) => {
@@ -153,16 +169,32 @@ export function useJobStream(jobId: string | undefined): {
         setSegments(initial.segments);
         setLoading(false);
         if (initial.status === "queued" || initial.status === "running") {
-          const source = new EventSource(`/api/jobs/${jobId}/events`);
-          sourceRef.current = source;
-          source.onmessage = (message) => {
-            try {
-              apply(JSON.parse(message.data) as JobEvent);
-            } catch {
-              /* ignore malformed frames */
+          if (unsubscribe) {
+            ready = true;
+            const seen = new Set(initial.segments.map((s) => `${s.start}|${s.text}`));
+            for (const event of pending.splice(0)) {
+              if (event.type === "segment") {
+                const key = `${event.segment.start}|${event.segment.text}`;
+                if (seen.has(key)) continue; // already covered by the snapshot
+                seen.add(key);
+              }
+              apply(event);
             }
-          };
-          // EventSource reconnects automatically on transient errors.
+          } else {
+            const source = new EventSource(`/api/jobs/${jobId}/events`);
+            sourceRef.current = source;
+            source.onmessage = (message) => {
+              try {
+                apply(JSON.parse(message.data) as JobEvent);
+              } catch {
+                /* ignore malformed frames */
+              }
+            };
+            // EventSource reconnects automatically on transient errors.
+          }
+        } else if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
         }
       })
       .catch((err: Error) => {
@@ -175,6 +207,7 @@ export function useJobStream(jobId: string | undefined): {
     return () => {
       alive = false;
       closeStream();
+      unsubscribe?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);

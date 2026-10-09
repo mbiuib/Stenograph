@@ -36,6 +36,7 @@ from ..bridge.session import MeetingSession
 from ..config import Settings, get_settings
 from ..domain.models import JobStatus
 from ..engines import available_asr
+from ..events import EventBus
 from ..live.capture import CaptureError, capture_supported, describe_devices
 from ..live.manager import LiveManager
 from ..live.web import parse_upload_frame
@@ -404,8 +405,12 @@ def create_app(
                     "sample_rate": 16000,
                 }
             )
+            events_done = anyio.Event()
             async with anyio.create_task_group() as tg:
                 tg.start_soon(_watch_live_session, websocket, live, session.job.id)
+                tg.start_soon(
+                    _forward_live_events, websocket, service.bus, session.job.id, events_done
+                )
                 while True:
                     message = await websocket.receive()
                     if message.get("type") == "websocket.disconnect":
@@ -433,6 +438,7 @@ def create_app(
                 # the session, the session waits for the `finally`.
                 with anyio.CancelScope(shield=True):
                     await anyio.to_thread.run_sync(live.stop_session, session.job.id)
+                events_done.set()
         except RuntimeError as exc:
             log.warning("live: не удалось начать браузерную сессию: %s", exc)
             try:
@@ -524,6 +530,33 @@ async def _watch_live_session(websocket: WebSocket, live: LiveManager, job_id: s
         await anyio.sleep(0.5)
     with contextlib.suppress(Exception):  # noqa: BLE001 — the client may be gone
         await websocket.close()
+
+
+async def _forward_live_events(
+    websocket: WebSocket, bus: EventBus, job_id: str, done: anyio.Event
+) -> None:
+    """Relay this job's events over the capture socket (no SSE per tab).
+
+    Chrome allows only six HTTP/1.1 sockets per host: an EventSource per
+    recording tab would consume one and stall every further request (status
+    polls included) once several tabs record at once. WebSockets live outside
+    that pool, so the live transcript rides the capture socket instead.
+    """
+    channel = bus.subscribe(job_id)
+    try:
+        while not done.is_set():
+            try:
+                event = await anyio.to_thread.run_sync(channel.get, True, 1.0)
+            except queue.Empty:
+                continue
+            except Exception:  # noqa: BLE001 — the bus went away: stop relaying
+                return
+            try:
+                await websocket.send_json({"type": "event", "event": event})
+            except Exception:  # noqa: BLE001 — the client may be gone already
+                return
+    finally:
+        bus.unsubscribe(job_id, channel)
 
 
 async def _caption_sender(websocket: WebSocket, session: MeetingSession) -> None:

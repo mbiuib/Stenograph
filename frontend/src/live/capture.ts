@@ -15,6 +15,8 @@ export interface LiveCaptureOptions {
   language?: string | null;
   title?: string | null;
   onLevel?: (track: LiveTrack, rms: number) => void;
+  /** Job events relayed by the server over this capture socket. */
+  onEvent?: (event: unknown) => void;
   onClosed?: (reason: string) => void;
 }
 
@@ -274,8 +276,13 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
   socket.onmessage = (event) => {
     if (typeof event.data !== "string") return;
     try {
-      const message = JSON.parse(event.data) as { type?: string; message?: string };
+      const message = JSON.parse(event.data) as {
+        type?: string;
+        message?: string;
+        event?: unknown;
+      };
       if (message.type === "error") notifyClosed(message.message || "сервер завершил сессию");
+      else if (message.type === "event") options.onEvent?.(message.event);
     } catch {
       /* ignore malformed frames */
     }

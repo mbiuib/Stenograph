@@ -6,6 +6,7 @@
  * The capture (WebSocket + MediaStreams) lives here, at module scope; the
  * page only subscribes to the snapshot (``useSyncExternalStore``).
  */
+import type { JobEvent } from "../types";
 import { startLiveCapture, type LiveCapture, type LiveTrack } from "./capture";
 
 export interface ActiveLiveSession {
@@ -48,6 +49,24 @@ export function getLiveSession(): LiveSessionSnapshot {
   return snapshot;
 }
 
+// The recording tab receives its own job's events over the capture socket
+// (see capture.ts); pages consume them instead of opening an EventSource, so
+// several recording tabs cannot exhaust the browser's socket budget.
+const eventListeners = new Set<(event: JobEvent) => void>();
+
+/** Subscribe to this tab's live job events; returns the unsubscribe. */
+export function subscribeLiveEvents(listener: (event: JobEvent) => void): () => void {
+  eventListeners.add(listener);
+  return () => {
+    eventListeners.delete(listener);
+  };
+}
+
+/** True when this tab owns the recording of the given job. */
+export function ownsLiveJob(jobId: string): boolean {
+  return snapshot.active?.jobId === jobId;
+}
+
 /** Start a recording owned by the store; rejects when one is already running. */
 export async function startLiveSession(options: {
   tracks: LiveTrack[];
@@ -69,6 +88,9 @@ export async function startLiveSession(options: {
       const jobId = capture?.jobId ?? snapshot.active?.jobId ?? null;
       capture = null;
       emit({ active: null, lastJobId: jobId, closedReason: reason });
+    },
+    onEvent: (event) => {
+      for (const listener of [...eventListeners]) listener(event as JobEvent);
     },
   });
 

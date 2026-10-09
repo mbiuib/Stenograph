@@ -153,6 +153,41 @@ def test_web_live_upload_end_to_end(tmp_path: Path) -> None:
     assert client.get("/api/live/status").json()["active"] is False
 
 
+def test_live_ws_relays_job_events(tmp_path: Path) -> None:
+    """The capture socket also carries this job's transcript events.
+
+    Chrome allows only six HTTP/1.1 sockets per host: an EventSource per
+    recording tab consumes one and starves every other request (status
+    polls included) once several tabs record. So the live events must ride
+    the capture WebSocket, which lives outside that pool.
+
+    Falsification: without the relay only the handshake answers — no event
+    ever arrives and the receive loop below times out.
+    """
+    service, live, _bus = _make_stack(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service, live=live))
+
+    with client.websocket_connect("/ws/live") as ws:
+        ws.send_json({"type": "start", "tracks": ["mic"]})
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        for step in range(6):
+            ws.send_bytes(_frame(TRACK_MIC, step))
+            sleep(0.1)
+
+        seen: dict = {}
+        for _ in range(80):
+            message = ws.receive_json()
+            if message.get("type") == "event":
+                seen = message["event"]
+                break
+        assert seen, "живые события обязаны приезжать по сокету захвата"
+        assert seen.get("type") in ("status", "meta", "level", "partial", "segment")
+        ws.send_json({"type": "stop"})
+
+    assert _wait_done(client, ready["job_id"])["status"] == "done"
+
+
 def test_web_live_parallel_sessions(tmp_path: Path) -> None:
     """Many users record at once: two concurrent WS sessions are both accepted.
 
@@ -355,9 +390,12 @@ def test_web_live_rest_stop_closes_the_upload_socket(tmp_path: Path) -> None:
         assert stopped.status_code == 200
         assert stopped.json()["status"] == "done", stopped.json()
 
-        # server closes the upload socket once the session is finalized
+        # server closes the upload socket once the session is finalized;
+        # relayed live events may still arrive before the close frame
         with pytest.raises(WebSocketDisconnect):
-            ws.receive_json()
+            for _ in range(50):
+                message = ws.receive_json()
+                assert message.get("type") == "event", message
 
     assert _wait_done(client, job_id)["status"] == "done"
     assert client.get("/api/live/status").json()["sessions"] == []
