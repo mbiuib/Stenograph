@@ -2,8 +2,20 @@
 import { useRef, useState } from "react";
 import { fmtClock, speakerLabel } from "../format";
 import type { Job, Segment } from "../types";
-import { IconPause, IconPlay } from "./Icons";
+import { IconDownload, IconPause, IconPlay } from "./Icons";
 import { Transcript } from "./Transcript";
+
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+/** Имя файла для скачивания: исходник как есть, микс — .mp3, дорожка — .wav. */
+function downloadName(job: Job, track: TrackOption | null): string | undefined {
+  if (!track) return undefined;
+  const kind = job.kind === "reprocess" ? String(job.meta.source_kind ?? "live") : job.kind;
+  if (kind === "file") return job.source_name;
+  const base = job.source_name.replace(/[\\/:*?"<>|]+/g, "·").trim() || job.id;
+  if (track.key === "") return `${base}.mp3`;
+  return `${base} — ${track.label}.wav`;
+}
 
 interface TrackOption {
   key: string;
@@ -83,6 +95,7 @@ export function TranscriptPlayer({
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [rate, setRate] = useState(1);
   const [audioError, setAudioError] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeek = useRef<number | null>(null);
@@ -190,6 +203,7 @@ export function TranscriptPlayer({
             setAudioError(false);
             setDuration(audio.duration || 0);
             setPosition(audio.currentTime);
+            audio.playbackRate = rate; // скорость не сбрасывается при смене дорожки
             if (pendingSeek.current != null) {
               audio.currentTime = pendingSeek.current;
               pendingSeek.current = null;
@@ -243,6 +257,33 @@ export function TranscriptPlayer({
                 }%, var(--color-edge) ${duration > 0 ? (position / duration) * 100 : 0}%)`,
               }}
             />
+            <select
+              value={rate}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setRate(next);
+                const audio = audioRef.current;
+                if (audio) audio.playbackRate = next;
+              }}
+              title="Скорость воспроизведения"
+              aria-label="Скорость воспроизведения"
+              className="shrink-0 rounded-md border border-edge bg-surface px-2 py-1 text-xs text-ink outline-none focus:border-accent/50"
+            >
+              {SPEEDS.map((speed) => (
+                <option key={speed} value={speed}>
+                  {speed}×
+                </option>
+              ))}
+            </select>
+            <a
+              href={current?.url}
+              download={downloadName(job, current)}
+              title="Скачать запись"
+              aria-label="Скачать запись"
+              className="grid size-9 shrink-0 place-items-center rounded-full border border-edge bg-surface2 text-muted transition-colors hover:border-accent/40 hover:text-ink"
+            >
+              <IconDownload className="size-4" />
+            </a>
           </div>
         )}
       </div>
