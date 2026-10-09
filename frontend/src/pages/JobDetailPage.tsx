@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { IconCopy, IconDownload, IconPencil, IconRefresh, IconTrash, IconX } from "../components/Icons";
 import { Markdown } from "../components/Markdown";
-import { Transcript } from "../components/Transcript";
+import { TranscriptPlayer } from "../components/TranscriptPlayer";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
 import {
   baseName,
@@ -614,7 +614,8 @@ export function JobDetailPage() {
       ) : (
         <Card title="Транскрипт" bodyClassName="p-4">
           {segments.length > 0 ? (
-            <Transcript
+            <TranscriptPlayer
+              job={job}
               segments={segments}
               speakers={speakers}
               live={job.status === "running"}

@@ -7,20 +7,32 @@ export function Transcript({
   speakers,
   live,
   speakerNames,
+  activeIndex = null,
+  onSeek,
 }: {
   segments: Segment[];
   speakers: string[];
   live: boolean;
   speakerNames?: Record<string, string>;
+  /** Index of the segment matching the current playback time (player sync). */
+  activeIndex?: number | null;
+  /** Click on a row: jump the player to that moment. */
+  onSeek?: (segment: Segment) => void;
 }) {
   const scroller = useRef<HTMLDivElement | null>(null);
+  const activeRow = useRef<HTMLDivElement | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
   useEffect(() => {
-    if (autoScroll && scroller.current) {
+    if (!autoScroll) return;
+    if (activeIndex != null && activeRow.current) {
+      activeRow.current.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (scroller.current) {
       scroller.current.scrollTop = scroller.current.scrollHeight;
     }
-  }, [segments.length, autoScroll]);
+  }, [segments.length, autoScroll, activeIndex]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -45,12 +57,20 @@ export function Transcript({
         )}
         {segments.map((segment, index) => {
           const color = segment.speaker ? speakerColor(segment.speaker, speakers) : undefined;
+          const isActive = index === activeIndex;
           return (
             <div
               key={`${segment.index}-${index}`}
+              ref={isActive ? activeRow : undefined}
+              onClick={onSeek ? () => onSeek(segment) : undefined}
+              title={onSeek ? "Перейти к этому моменту записи" : undefined}
               className={`flex gap-3 border-b border-edge/60 px-3 py-2 last:border-b-0 ${
-                live && index === segments.length - 1 ? "seg-enter bg-surface2/40" : ""
-              }`}
+                isActive
+                  ? "bg-accent/10"
+                  : live && index === segments.length - 1
+                    ? "seg-enter bg-surface2/40"
+                    : ""
+              } ${onSeek ? (isActive ? "cursor-pointer" : "cursor-pointer hover:bg-surface2/30") : ""}`}
             >
               <span className="tabular w-16 shrink-0 pt-0.5 text-right text-xs text-muted">
                 {fmtTimestamp(segment.start)}

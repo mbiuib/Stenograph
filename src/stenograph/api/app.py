@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import __version__, loopwatch, metrics
+from ..audio import ensure_mix, existing_tracks, source_file, track_kind
 from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
 from ..bridge.session import MeetingSession
@@ -233,6 +234,48 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return new_job.model_dump()
+
+    @app.get("/api/jobs/{job_id}/audio")
+    def job_audio(job_id: str) -> FileResponse:
+        """Default playable stream of a job: the source file or a mixed live recording.
+
+        Live-style recordings are mixed from their tracks with ffmpeg (cached
+        under ``data/mixes``); Jitsi meetings have no single aligned stream —
+        use ``/audio/{track}`` for the participant files.
+        """
+        job = service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        kind = track_kind(job)
+        if kind == "file":
+            direct = source_file(job)
+            if direct is None:
+                raise HTTPException(status_code=404, detail="исходный файл недоступен")
+            return FileResponse(direct)
+        if kind == "live":
+            if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+                raise HTTPException(status_code=409, detail="запись ещё идёт")
+            try:
+                return FileResponse(ensure_mix(settings, job))
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404,
+            detail="у этой записи нет общего потока — выберите дорожку участника",
+        )
+
+    @app.get("/api/jobs/{job_id}/audio/{track}")
+    def job_audio_track(job_id: str, track: str) -> FileResponse:
+        """One recorded track: live «system»/«mic» or a Jitsi participant name."""
+        job = service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        path = existing_tracks(job).get(track)
+        if path is None:
+            raise HTTPException(status_code=404, detail="дорожка не найдена")
+        return FileResponse(path)
 
     @app.post("/api/jobs/{job_id}/analyze", status_code=201)
     def analyze_job(
