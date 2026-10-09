@@ -154,3 +154,30 @@ body {
   color: var(--color-accent);
   text-decoration: underline;
 }
+
+/* Плеер записи (TranscriptPlayer): тёмный ползунок в тон темы */
+.player-range:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 50%, transparent);
+  outline-offset: 2px;
+}
+.player-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  background: var(--color-ink);
+  border: 2px solid var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+  transition: transform 120ms ease;
+}
+.player-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.player-range::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  background: var(--color-ink);
+  border: 2px solid var(--color-accent);
+}

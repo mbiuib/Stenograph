@@ -1,7 +1,8 @@
 /** Audio player + transcript synced by playback time (job detail page). */
 import { useRef, useState } from "react";
-import { speakerLabel } from "../format";
+import { fmtClock, speakerLabel } from "../format";
 import type { Job, Segment } from "../types";
+import { IconPause, IconPlay } from "./Icons";
 import { Transcript } from "./Transcript";
 
 interface TrackOption {
@@ -79,6 +80,10 @@ export function TranscriptPlayer({
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const current = tracks.find((track) => track.key === selectedKey) ?? tracks[0] ?? null;
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [audioError, setAudioError] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeek = useRef<number | null>(null);
 
@@ -99,11 +104,35 @@ export function TranscriptPlayer({
     setActiveIndex(index);
   };
 
+  /** Обновляем позицию не чаще раза в секунду (подсветка живёт отдельно). */
+  const tickPosition = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const time = audio.currentTime;
+    setPosition((previous) => (Math.floor(previous) === Math.floor(time) ? previous : time));
+  };
+
+  const togglePlay = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) void audio.play().catch(() => {});
+    else audio.pause();
+  };
+
+  /** Сброс при смене дорожки: новая запись начинается с нуля. */
+  const resetPlayback = () => {
+    setPlaying(false);
+    setPosition(0);
+    setDuration(0);
+    setAudioError(false);
+  };
+
   const seek = (time: number, speaker?: string | null) => {
     const audio = audioRef.current;
     if (current?.speaker && speaker && tracks.some((track) => track.key === speaker)) {
       if (speaker !== current.key) {
         pendingSeek.current = time;
+        resetPlayback();
         setSelectedKey(speaker);
         return;
       }
@@ -134,6 +163,7 @@ export function TranscriptPlayer({
                 value={current?.key ?? ""}
                 onChange={(event) => {
                   pendingSeek.current = null;
+                  resetPlayback();
                   setSelectedKey(event.target.value);
                 }}
                 className="rounded-md border border-edge bg-surface px-2 py-1 text-xs text-ink outline-none focus:border-accent/50"
@@ -152,21 +182,69 @@ export function TranscriptPlayer({
           key={`${current?.key ?? ""}`}
           ref={audioRef}
           src={current?.url}
-          controls
           preload="metadata"
-          className="h-10 w-full"
+          className="hidden"
           onLoadedMetadata={() => {
             const audio = audioRef.current;
-            if (audio && pendingSeek.current != null) {
+            if (!audio) return;
+            setAudioError(false);
+            setDuration(audio.duration || 0);
+            setPosition(audio.currentTime);
+            if (pendingSeek.current != null) {
               audio.currentTime = pendingSeek.current;
               pendingSeek.current = null;
               void audio.play().catch(() => {});
             }
             syncActive();
           }}
-          onTimeUpdate={syncActive}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => setPlaying(false)}
+          onError={() => setAudioError(true)}
+          onTimeUpdate={() => {
+            syncActive();
+            tickPosition();
+          }}
           onSeeked={syncActive}
         />
+        {audioError ? (
+          <p className="text-xs text-err">Аудио недоступно — файл записи не найден на сервере.</p>
+        ) : (
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={togglePlay}
+              title={playing ? "Пауза" : "Слушать"}
+              aria-label={playing ? "Пауза" : "Слушать"}
+              className="grid size-9 shrink-0 place-items-center rounded-full border border-edge bg-surface2 text-accent transition-colors hover:border-accent/40 hover:bg-accent/10"
+            >
+              {playing ? <IconPause className="size-4" /> : <IconPlay className="size-4" />}
+            </button>
+            <span className="tabular w-24 shrink-0 text-center text-xs text-muted">
+              {fmtClock(position)} / {fmtClock(duration)}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={duration > 0 ? duration : 1}
+              step={0.05}
+              value={duration > 0 ? Math.min(position, duration) : 0}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                const audio = audioRef.current;
+                setPosition(next);
+                if (audio) audio.currentTime = next;
+              }}
+              aria-label="Позиция воспроизведения"
+              className="player-range h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full"
+              style={{
+                background: `linear-gradient(to right, var(--color-accent) ${
+                  duration > 0 ? (position / duration) * 100 : 0
+                }%, var(--color-edge) ${duration > 0 ? (position / duration) * 100 : 0}%)`,
+              }}
+            />
+          </div>
+        )}
       </div>
       {(segments.length > 0 || live) && (
         <Transcript
