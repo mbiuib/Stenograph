@@ -69,7 +69,7 @@ def create_app(
         reprocess=service.chain_reprocess,
         auto_reprocess=settings.live_auto_reprocess,
     )
-    bridge = bridge or BridgeManager(settings, service.repo, service.bus)
+    bridge = bridge or BridgeManager(settings, service.repo, service.bus, pool=live)
     # Background ASR yields to the air: heavy jobs wait while these are live.
     service.realtime_provider = lambda: live.has_active() or bridge.has_active()
 

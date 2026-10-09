@@ -15,8 +15,19 @@ from stenograph.bridge.manager import BridgeManager
 from stenograph.bridge.protocol import FrameError, is_eof, normalize_language, parse_frame
 from stenograph.config import Settings
 from stenograph.events import EventBus
+from stenograph.live.manager import LiveManager
 from stenograph.service import TranscriptionService
 from stenograph.storage import JobRepository
+from test_live_batch import BatchRecorder
+
+
+def _wait_until(condition, timeout: float = 15.0, pause: float = 0.1) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(pause)
+    return condition()
 
 
 def frame(participant_id: str, language: str, audio: np.ndarray) -> bytes:
@@ -138,3 +149,71 @@ def test_bridge_second_participant_and_reconnect(tmp_path: Path) -> None:
     second = jobs[0]
     assert second.status == "done"
     assert second.meta["participants"] == {"p2": "Спикер 1"}
+
+
+def _make_pooled_stack(tmp_path: Path):
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    service = TranscriptionService(settings, repo, bus, engine_factory=lambda n, s: FakeEngine())
+    batch = BatchRecorder()
+    live = LiveManager(
+        settings,
+        repo,
+        bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+        batch_factory=lambda language: batch,
+    )
+    bridge = BridgeManager(
+        settings,
+        repo,
+        bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+        pool=live,
+    )
+    client = TestClient(create_app(settings=settings, service=service, live=live, bridge=bridge))
+    return client, repo, batch
+
+
+def test_bridge_participants_join_the_batched_pool(tmp_path: Path) -> None:
+    """Two meetings' participants are decoded in ONE shared batched pass.
+
+    Falsification: with per-meeting ticking each participant runs its own
+    engine call — the recorded batch sizes never reach two.
+    """
+    client, repo, batch = _make_pooled_stack(tmp_path)
+    with (
+        client.websocket_connect("/ws/room-p") as first,
+        client.websocket_connect("/ws/room-q") as second,
+    ):
+        for index in range(8):
+            first.send_bytes(frame("p1", "ru", encoded_chunk(index)))
+            second.send_bytes(frame("p2", "ru", encoded_chunk(40 + index)))
+
+        assert _wait_until(lambda: max(batch.sizes, default=0) >= 2), batch.sizes
+
+        got = {"first": False, "second": False}
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not all(got.values()):
+            for key, socket in (("first", first), ("second", second)):
+                if got[key]:
+                    continue
+                message = socket.receive_json()
+                if message["type"] in ("partial", "final") and "фраза" in message["text"]:
+                    got[key] = True
+        assert all(got.values()), got
+
+        first.send_bytes(b"\x00")
+        second.send_bytes(b"\x00")
+
+    deadline = time.monotonic() + 15
+    jobs = []
+    while time.monotonic() < deadline:
+        jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
+        if len(jobs) == 2 and all(job.status == "done" for job in jobs):
+            break
+        time.sleep(0.05)
+    assert len(jobs) == 2, [(job.id, job.status) for job in jobs]
+    assert all(job.status == "done" for job in jobs), [job.error for job in jobs]
+    assert all(job.segments for job in jobs)

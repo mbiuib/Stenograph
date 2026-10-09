@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from fakes import FakeEngine, PositionTranscriber, encoded_chunk, speech_audio
 from stenograph.api.app import create_app
 from stenograph.config import Settings
+from stenograph.domain.models import Job
 from stenograph.events import EventBus
 from stenograph.live.manager import LiveManager
 from stenograph.live.streamer import StreamTracker, WindowWord
@@ -168,3 +169,54 @@ def test_batch_round_serves_two_sessions_in_one_pass(tmp_path: Path) -> None:
 
     assert _wait_done(client, first_id)["status"] == "done"
     assert _wait_done(client, second_id)["status"] == "done"
+
+
+# -- external streams (bridge participants) in the pool ------------------------
+
+
+class StubStream:
+    """Minimal external stream for the pool (records what it received)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.words: list[WindowWord] | None = None
+        self.job = Job(kind="jitsi", source_name="внешний поток")
+
+    @property
+    def finished(self) -> bool:
+        return False
+
+    def needs_turn(self) -> bool:
+        return self.words is None
+
+    def begin_batch_window(self, *, cap_sec: float | None = None):
+        self.calls += 1
+        return ("", speech_audio(1.0))
+
+    def end_batch_window(self, track, words):
+        if words:
+            self.words = list(words)
+        return self.needs_turn()
+
+
+def test_adopted_streams_ride_the_same_batched_pass(tmp_path: Path) -> None:
+    """External streams (bridge participants) are served by the shared pool.
+
+    Falsification: with the old per-meeting tick loop an adopted stub is
+    never served here — ``words`` would stay None and the wait would time out.
+    """
+    batch = BatchRecorder()
+    _service, live = _make_stack(tmp_path, batch_factory=lambda language: batch)
+    first, second = StubStream(), StubStream()
+    assert live.adopt("jitsi:1:p1", first)
+    assert live.adopt("jitsi:2:p1", second)
+
+    assert _wait_until(lambda: first.words is not None and second.words is not None), (
+        first.calls,
+        second.calls,
+        batch.sizes,
+    )
+    assert max(batch.sizes) >= 2  # both external streams rode one engine pass
+    assert any("фраза" in word[2] for word in first.words)
+    live.unadopt("jitsi:1:p1")
+    live.unadopt("jitsi:2:p1")

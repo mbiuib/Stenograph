@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     live_batch_max: int = 20  # windows merged into one batched engine pass
     live_batch_window_sec: float = 5.0  # per-window audio cap inside one pass
     live_batch_hold_sec: float = 0.5  # trailing edge kept for the next window
+    # Jitsi captions: shorter windows than live — the caption lag equals the cap.
+    bridge_batch_window_sec: float = 3.0
+    bridge_batch_hold_sec: float = 0.4
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

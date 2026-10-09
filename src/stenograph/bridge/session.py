@@ -48,6 +48,61 @@ class _Participant:
     tracker: StreamTracker
     writer: Any  # wave.Wave_write
     path: Path
+    language: str | None = None
+    stream: Any | None = None  # pool adapter when served by the shared decoder
+
+
+class _ParticipantStream:
+    """One participant exposed to the shared live decode pool.
+
+    The pool (LiveManager) calls this surface from its own decode thread; the
+    meeting's pump then only buffers incoming frames and writes WAV files.
+    Mirrors a live session's serving interface: ``job``/``finished``/
+    ``needs_turn``/``begin_batch_window``/``end_batch_window``.
+    """
+
+    def __init__(
+        self, session: MeetingSession, participant_id: str, language: str | None
+    ) -> None:
+        self._session = session
+        self._participant_id = participant_id
+        self.language = language
+
+    @property
+    def job(self) -> Job:
+        return self._session.job
+
+    @property
+    def finished(self) -> bool:
+        return False
+
+    @property
+    def batch_cap_sec(self) -> float:
+        return self._session._bridge_cap
+
+    def needs_turn(self) -> bool:
+        return self._session._participant_needs_turn(self._participant_id)
+
+    def begin_batch_window(
+        self, *, cap_sec: float | None = None
+    ) -> tuple[str, np.ndarray] | None:
+        self._session._drain_pending(self._participant_id)
+        participant = self._session._participants.get(self._participant_id)
+        if participant is None:
+            return None
+        audio = participant.tracker.pending_window(cap_sec=cap_sec)
+        if audio is None:
+            return None
+        return ("", audio)
+
+    def end_batch_window(self, track: str | None, words: list[Any] | None) -> bool:
+        if words is not None:
+            participant = self._session._participants.get(self._participant_id)
+            if participant is not None:
+                participant.tracker.apply_window(
+                    list(words), hold_sec=self._session._bridge_hold
+                )
+        return self.needs_turn()
 
 
 class MeetingSession:
@@ -60,6 +115,7 @@ class MeetingSession:
         repo: JobRepository,
         bus: EventBus,
         transcriber_factory: Any,
+        pool: Any | None = None,
     ) -> None:
         self.meeting_id = meeting_id
         self.job = Job(
@@ -76,6 +132,9 @@ class MeetingSession:
         self._repo = repo
         self._bus = bus
         self._factory = transcriber_factory
+        self._pool = pool  # shared live decode pool (None = tick in this thread)
+        self._bridge_cap = settings.bridge_batch_window_sec
+        self._bridge_hold = settings.bridge_batch_hold_sec
         self._lock = threading.Lock()  # guards participants/pending/segments
         self._participants: dict[str, _Participant] = {}
         self._pending: dict[str, list[np.ndarray]] = {}
@@ -129,14 +188,49 @@ class MeetingSession:
             max_window_sec=self._settings.live_max_window_sec,
         )
         participant = _Participant(
-            participant_id=participant_id, label=label, tracker=tracker, writer=writer, path=path
+            participant_id=participant_id,
+            label=label,
+            tracker=tracker,
+            writer=writer,
+            path=path,
+            language=language,
         )
         self._participants[participant_id] = participant
         self._pending[participant_id] = []
         self.job.meta.setdefault("participants", {})[participant_id] = label
         self.job.meta.setdefault("audio", {})[label] = str(path)
+        if self._pool is not None:
+            stream = _ParticipantStream(self, participant_id, language)
+            if self._pool.adopt(self._stream_key(participant_id), stream):
+                participant.stream = stream  # served by the shared batched pool
         log.info("jitsi bridge: участник %s → «%s»", participant_id, label)
         return participant
+
+    # -- shared-pool helping (decode pool thread) ------------------------------
+
+    def _stream_key(self, participant_id: str) -> str:
+        """Pool registry key of one participant (unique across meetings)."""
+        return f"{self.job.id}:{participant_id}"
+
+    def _drain_pending(self, participant_id: str) -> None:
+        """Move buffered frames into the participant's tracker (pool thread)."""
+        with self._lock:
+            chunks = self._pending.get(participant_id, [])
+            self._pending[participant_id] = []
+        participant = self._participants.get(participant_id)
+        if participant is None:
+            return
+        for chunk in chunks:
+            participant.tracker.feed(chunk)
+
+    def _participant_needs_turn(self, participant_id: str) -> bool:
+        """True while the pool still has work for this participant."""
+        with self._lock:
+            has_pending = bool(self._pending.get(participant_id))
+        if has_pending:
+            return True
+        participant = self._participants.get(participant_id)
+        return participant is not None and participant.tracker.ready()
 
     # -- caption messages (decode worker thread) --------------------------------
 
@@ -183,6 +277,7 @@ class MeetingSession:
             while not self._stop_event.is_set():
                 self._pump_participants()
                 time.sleep(0.15)
+            self._detach_streams()
             self._pump_participants()
             for participant in list(self._participants.values()):
                 participant.tracker.flush()
@@ -193,8 +288,32 @@ class MeetingSession:
         finally:
             self._closed.set()
 
+    def _detach_streams(self) -> None:
+        """Release pooled participants back to this thread for the final flush.
+
+        ``unadopt`` waits for any in-flight serve round, so after it returns
+        the tracker belongs exclusively to this thread again.
+        """
+        pool = self._pool
+        if pool is None:
+            return
+        for participant in list(self._participants.values()):
+            if participant.stream is None:
+                continue
+            try:
+                pool.unadopt(self._stream_key(participant.participant_id))
+            except Exception:  # noqa: BLE001 — finalization must not be blocked
+                log.exception(
+                    "jitsi bridge: не удалось отцепить участника %s от пула",
+                    participant.participant_id,
+                )
+            participant.stream = None
+            self._drain_pending(participant.participant_id)
+
     def _pump_participants(self) -> None:
         for participant_id, participant in list(self._participants.items()):
+            if participant.stream is not None:
+                continue  # the shared decode pool feeds and serves this one
             with self._lock:
                 chunks = self._pending.get(participant_id, [])
                 self._pending[participant_id] = []

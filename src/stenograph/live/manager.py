@@ -159,6 +159,8 @@ class LiveManager:
         self._queued: set[str] = set()  # turn-queue membership, for O(1) dedupe
         self._serving_id: str | None = None  # session the decoder works on right now
         self._serving_ids: set[str] = set()  # batched round: sessions in one pass
+        self._adopted: dict[str, Any] = {}  # external realtime streams (bridge) in the pool
+        self._serve_guard = threading.RLock()  # serializes serve rounds vs adopt/unadopt
         self._server_session_id: str | None = None  # the single WASAPI capture session
         self._lock = threading.Lock()
         self._decoder = threading.Thread(
@@ -172,6 +174,29 @@ class LiveManager:
         """True while at least one live session runs (used by the worker gate)."""
         with self._lock:
             return bool(self._sessions)
+
+    # -- external streams (Jitsi bridge participants) --------------------------
+
+    def adopt(self, key: str, stream: Any) -> bool:
+        """Register an external realtime stream in the batched decode pool.
+
+        The stream mirrors a live session's serving surface: ``job`` (for
+        language grouping), ``finished``, ``needs_turn()``,
+        ``begin_batch_window(cap_sec=...)`` and ``end_batch_window(track,
+        words)``. Returns False when the batched path is unavailable — the
+        caller then keeps serving the stream on its own thread.
+        """
+        if self._batch_factory is None:
+            return False
+        with self._serve_guard, self._lock:
+            self._adopted[key] = stream
+        return True
+
+    def unadopt(self, key: str) -> None:
+        """Remove an external stream; waits for any in-flight serve to finish."""
+        with self._serve_guard, self._lock:
+            self._adopted.pop(key, None)
+            self._queued.discard(key)
 
     def status(self) -> dict:
         """Live sessions and the state of the transcription queue, for the UI."""
@@ -420,11 +445,11 @@ class LiveManager:
             self._refresh_turns()
             if not self._turn:
                 return False
-            picked: list[tuple[str, _LiveSession]] = []
+            picked: list[tuple[str, Any]] = []
             while self._turn and len(picked) < self._settings.live_batch_max:
                 job_id = self._turn.popleft()
                 self._queued.discard(job_id)
-                session = self._sessions.get(job_id)
+                session: Any = self._sessions.get(job_id) or self._adopted.get(job_id)
                 if session is not None:
                     picked.append((job_id, session))
         if not picked:
@@ -433,12 +458,20 @@ class LiveManager:
 
         session_by_id = dict(picked)
         by_language: dict[str | None, list[tuple[str, str, np.ndarray]]] = {}
-        for job_id, session in picked:
-            window = session.begin_batch_window(cap_sec=self._settings.live_batch_window_sec)
-            if window is None:
-                continue
-            track, audio = window
-            by_language.setdefault(session.job.language, []).append((job_id, track, audio))
+        with self._lock:
+            for job_id, session in picked:
+                if not self._is_registered(job_id, session):
+                    continue  # released while the round was being planned
+                cap = (
+                    getattr(session, "batch_cap_sec", None)
+                    or self._settings.live_batch_window_sec
+                )
+                window = session.begin_batch_window(cap_sec=cap)
+                if window is None:
+                    continue
+                track, audio = window
+                language = getattr(session, "language", None) or session.job.language
+                by_language.setdefault(language, []).append((job_id, track, audio))
 
         collected_at = time.monotonic()
         engine_done = collected_at
@@ -449,33 +482,39 @@ class LiveManager:
                 self._serving_ids = {
                     job_id for group in by_language.values() for job_id, _, _ in group
                 }
-            try:
-                for language, group in by_language.items():
-                    transcriber = batch_factory(language)
-                    outputs = transcriber([audio for _, _, audio in group])
-                    rows_total += len(group)
-                    if len(outputs) != len(group):
-                        raise RuntimeError("батч-инференс вернул неверное число результатов")
-                    for (job_id, track, _audio), words in zip(group, outputs, strict=True):
-                        session = session_by_id.get(job_id)
-                        if session is not None:
-                            session.end_batch_window(track, words)
-            except Exception:  # noqa: BLE001 — keep sessions alive, retry next round
-                log.exception("live-декодер: батч-инференс упал")
-            finally:
-                engine_done = time.monotonic()
-                with self._lock:
-                    self._serving_ids = set()
+            with self._serve_guard:
+                try:
+                    for language, group in by_language.items():
+                        transcriber = batch_factory(language)
+                        outputs = transcriber([audio for _, _, audio in group])
+                        rows_total += len(group)
+                        if len(outputs) != len(group):
+                            raise RuntimeError("батч-инференс вернул неверное число результатов")
+                        for (job_id, track, _audio), words in zip(group, outputs, strict=True):
+                            with self._lock:
+                                session = session_by_id.get(job_id)
+                                registered = session is not None and self._is_registered(
+                                    job_id, session
+                                )
+                            if registered and session is not None:
+                                session.end_batch_window(track, words)
+                except Exception:  # noqa: BLE001 — keep sessions alive, retry next round
+                    log.exception("live-декодер: батч-инференс упал")
+                finally:
+                    engine_done = time.monotonic()
+                    with self._lock:
+                        self._serving_ids = set()
 
         taken_ids = {job_id for group in by_language.values() for job_id, _, _ in group}
         for job_id, session in picked:
-            if job_id in taken_ids:
-                continue
+            known = self._sessions.get(job_id)
+            if job_id in taken_ids or known is None or known is not session:
+                continue  # adopted streams have no stop/finalize bookkeeping
             try:
-                session.end_batch_window(None, None)
+                known.end_batch_window(None, None)
             except Exception:  # noqa: BLE001 — one broken session must not stop the rest
                 log.exception("live-декодер: сессия %s упала на пустом ходе", job_id)
-                session.fail("внутренняя ошибка транскрибации")
+                known.fail("внутренняя ошибка транскрибации")
 
         finished: list[_LiveSession] = []
         with self._lock:
@@ -485,10 +524,11 @@ class LiveManager:
                         self._sessions.pop(job_id, None)
                     if self._server_session_id == job_id:
                         self._server_session_id = None
-                    finished.append(session)
+                    live_session: _LiveSession = session  # picked from the live registry
+                    finished.append(live_session)
                 elif (
                     session.needs_turn()
-                    and self._sessions.get(job_id) is session
+                    and self._is_registered(job_id, session)
                     and job_id not in self._queued
                 ):
                     self._queued.add(job_id)
@@ -513,14 +553,19 @@ class LiveManager:
                 log.debug("батч-раунд: %d окон за %.2f с", rows_total, round_total)
         return True
 
+    def _is_registered(self, job_id: str, session: Any) -> bool:
+        """True while the stream is still in the pool registries (under the lock)."""
+        return self._sessions.get(job_id) is session or self._adopted.get(job_id) is session
+
     def _refresh_turns(self) -> None:
-        """Queue every session with pending work (call under the lock)."""
-        for job_id, session in self._sessions.items():
-            if job_id == self._serving_id or job_id in self._queued:
+        """Queue every stream with pending work (call under the lock)."""
+        streams = list(self._sessions.items()) + list(self._adopted.items())
+        for stream_id, stream in streams:
+            if stream_id == self._serving_id or stream_id in self._queued:
                 continue
-            if session.needs_turn():
-                self._queued.add(job_id)
-                self._turn.append(job_id)
+            if stream.needs_turn():
+                self._queued.add(stream_id)
+                self._turn.append(stream_id)
 
     def _emit_levels(self) -> None:
         """Publish input level meters for every live session (throttled per session)."""

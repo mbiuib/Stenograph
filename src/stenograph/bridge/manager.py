@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import Any
 
 from ..config import Settings
 from ..events import EventBus
@@ -29,11 +30,13 @@ class BridgeManager:
         bus: EventBus,
         *,
         transcriber_factory: TranscriberFactory | None = None,
+        pool: Any | None = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._bus = bus
         self._factory = transcriber_factory or default_transcriber_factory(settings)
+        self._pool = pool  # shared live decode pool; None = per-meeting ticking
         self._sessions: dict[str, MeetingSession] = {}
         self._lock = threading.Lock()
 
@@ -42,7 +45,12 @@ class BridgeManager:
         with self._lock:
             previous = self._sessions.pop(meeting_id, None)
             session = MeetingSession(
-                meeting_id, self._settings, self._repo, self._bus, self._factory
+                meeting_id,
+                self._settings,
+                self._repo,
+                self._bus,
+                self._factory,
+                pool=self._pool,
             )
             self._sessions[meeting_id] = session
         if previous is not None:
