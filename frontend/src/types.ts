@@ -130,3 +130,48 @@ export interface LiveDevices {
   devices: { loopback?: string; microphone?: string };
   error?: string;
 }
+
+export interface MetricsGpu {
+  name: string;
+  utilization_pct: number;
+  vram_total_mb: number;
+  vram_used_mb: number;
+  vram_free_mb: number;
+}
+
+export interface GpuProcess {
+  pid: number;
+  name: string | null;
+  vram_mb: number;
+}
+
+export interface ModelMemory {
+  engine: string;
+  model: string;
+  vram_mb: number | null;
+  ram_mb: number | null;
+  loaded_at: string;
+  last_used_at: string;
+  idle_sec: number | null;
+  load_number: number;
+}
+
+export interface MetricsSnapshot {
+  ts: string;
+  system: {
+    gpu: MetricsGpu | null;
+    self_process: {
+      pid: number;
+      rss_mb: number | null;
+      commit_mb: number | null;
+      cpu_pct: number | null;
+      vram_mb: number | null;
+    };
+    gpu_processes: GpuProcess[] | null;
+  };
+  models: ModelMemory[];
+  live: LiveStatus;
+  queue: QueueSnapshot;
+  jobs: Record<string, number>;
+  llm: { lm_studio: boolean };
+}

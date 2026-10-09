@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import __version__
+from .. import __version__, metrics
 from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
 from ..bridge.session import MeetingSession
@@ -60,6 +60,7 @@ def create_app(
     """Build the web application; inject a service/live/bridge manager for tests."""
     settings = settings or get_settings()
     settings.ensure_dirs()
+    metrics.prime()
     service = service or build_default_service(settings)
     live = live or LiveManager(
         settings,
@@ -290,6 +291,19 @@ def create_app(
             "activity": service.repo.activity(30),
             "recent": [job.model_dump() for job in service.list_jobs(limit=8)],
         }
+
+    @app.get("/api/metrics")
+    def get_metrics() -> dict:
+        """Live resource snapshot: GPU, per-model memory, queue and live state."""
+        view = service.queue_view()
+        return metrics.snapshot(
+            live=live.status(),
+            queue={
+                "active": view["active"].model_dump() if view["active"] else None,
+                "waiting": [job.model_dump() for job in view["waiting"]],
+            },
+            counts=service.repo.count_by_status(),
+        )
 
     # -- live sessions -------------------------------------------------------
 

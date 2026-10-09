@@ -4,6 +4,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { JobDetailPage } from "./pages/JobDetailPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LivePage } from "./pages/LivePage";
+import { MonitorPage } from "./pages/MonitorPage";
 import { NewJobPage } from "./pages/NewJobPage";
 
 export function App() {
@@ -12,6 +13,7 @@ export function App() {
       <Route element={<Layout />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/live" element={<LivePage />} />
+        <Route path="/monitor" element={<MonitorPage />} />
         <Route path="/jobs" element={<JobsPage />} />
         <Route path="/jobs/new" element={<NewJobPage />} />
         <Route path="/jobs/:id" element={<JobDetailPage />} />

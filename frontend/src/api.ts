@@ -6,6 +6,7 @@ import type {
   Job,
   LiveDevices,
   LiveStatus,
+  MetricsSnapshot,
   QueueSnapshot,
   Stats,
 } from "./types";
@@ -75,6 +76,7 @@ export const api = {
   queue: (): Promise<QueueSnapshot> => request<QueueSnapshot>("/api/queue"),
   engines: (): Promise<EngineList> => request<EngineList>("/api/engines"),
   config: (): Promise<AppConfig> => request<AppConfig>("/api/config"),
+  metrics: (): Promise<MetricsSnapshot> => request<MetricsSnapshot>("/api/metrics"),
 
   liveStatus: (): Promise<LiveStatus> => request<LiveStatus>("/api/live/status"),
   liveDevices: (): Promise<LiveDevices> => request<LiveDevices>("/api/live/devices"),

@@ -27,6 +27,7 @@ from typing import Any
 
 from ..domain.errors import JobCancelled
 from ..domain.models import Segment
+from ..metrics import note_model_loaded, touch_engine
 from .base import (
     AsrResult,
     CancelCallback,
@@ -263,6 +264,7 @@ class MossEngine:
                     log.info("chat template loaded manually from chat_template.jinja")
 
             self._torch, self._model, self._processor = torch, model, processor
+            note_model_loaded(self.name, self.model_id)
             return self._torch, self._model, self._processor
 
     def transcribe(
@@ -276,6 +278,7 @@ class MossEngine:
     ) -> AsrResult:
         """Transcribe and diarize the file; segments stream as chunks finish."""
         torch, model, processor = self._load()
+        touch_engine(self)
         from moss_transcribe_diarize import parse_transcript
         from moss_transcribe_diarize.inference_utils import (
             build_transcription_messages,

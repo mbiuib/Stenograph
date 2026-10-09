@@ -17,6 +17,7 @@ import numpy as np
 from .. import cuda
 from ..domain.errors import JobCancelled
 from ..domain.models import Segment
+from ..metrics import note_model_loaded, touch_engine
 from .base import (
     AsrResult,
     CancelCallback,
@@ -72,6 +73,7 @@ class FasterWhisperEngine:
             ref = self.resolve_model()
             log.info("loading whisper model '%s' on %s (%s)", ref, self.device, self.compute_type)
             self._model = WhisperModel(ref, device=self.device, compute_type=self.compute_type)
+            note_model_loaded(self.name, self.model_id)
         return self._model
 
     def transcribe(
@@ -85,6 +87,7 @@ class FasterWhisperEngine:
     ) -> AsrResult:
         """Transcribe the file; reports every segment as soon as it is decoded."""
         model = self._load()
+        touch_engine(self)
         from faster_whisper import BatchedInferencePipeline
 
         kwargs: dict[str, Any] = {
@@ -169,6 +172,7 @@ class FasterWhisperEngine:
         greedy decoding keeps each streaming step cheap.
         """
         model = self._load()
+        touch_engine(self)
         segments, _info = model.transcribe(
             audio,
             language=language,

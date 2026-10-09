@@ -54,6 +54,16 @@ export function IconMic(props: IconProps) {
   );
 }
 
+export function IconGauge(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M20.2 15a8.5 8.5 0 1 0-16.4 0" />
+      <path d="M12 14l3.2-3.2" />
+      <circle cx="12" cy="14" r="1.1" fill="currentColor" stroke="none" />
+    </Svg>
+  );
+}
+
 export function IconTrash(props: IconProps) {
   return (
     <Svg {...props}>
