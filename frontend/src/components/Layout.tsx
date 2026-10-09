@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { useNow } from "../hooks";
 import { getLiveSession, subscribeLiveSession } from "../live/session";
-import { IconDashboard, IconGauge, IconJobs, IconMic, IconPlus } from "./Icons";
+import { IconDashboard, IconGauge, IconJobs, IconMic, IconPlus, IconVideo } from "./Icons";
 
 export function Layout() {
   const live = useSyncExternalStore(subscribeLiveSession, getLiveSession);
@@ -43,6 +43,10 @@ export function Layout() {
           <NavLink to="/live" className={linkClass}>
             <IconMic className="size-5 shrink-0" />
             <span className="hidden md:block">Live</span>
+          </NavLink>
+          <NavLink to="/jitsi" className={linkClass}>
+            <IconVideo className="size-5 shrink-0" />
+            <span className="hidden md:block">Jitsi</span>
           </NavLink>
           <NavLink to="/monitor" className={linkClass}>
             <IconGauge className="size-5 shrink-0" />

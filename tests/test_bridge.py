@@ -130,6 +130,34 @@ def test_bridge_streams_captions_and_persists(tmp_path: Path) -> None:
     assert audio_file.stat().st_size > 44
 
 
+def test_jitsi_status_reports_live_meetings(tmp_path: Path) -> None:
+    """The Jitsi tab sees live meetings: participants, counters, audio seconds."""
+    client, _repo = _make_stack(tmp_path)
+    with client.websocket_connect("/ws/room-status") as websocket:
+        for index in range(8):
+            websocket.send_bytes(frame("p1", "ru-RU", encoded_chunk(index)))
+        for _ in range(30):
+            message = websocket.receive_json()
+            if message["type"] in ("partial", "final"):
+                break
+
+        status = client.get("/api/jitsi/status").json()
+        assert status["active"] is True
+        meeting = status["meetings"][0]
+        assert meeting["meeting_id"] == "room-status"
+        assert meeting["job_id"]
+        assert meeting["duration_sec"] >= 0
+        assert meeting["participants"], meeting
+        first = meeting["participants"][0]
+        assert first["label"] == "Спикер 1"
+        assert first["audio_sec"] > 0
+        assert first["last_frame_sec"] is not None
+
+    assert _wait_until(
+        lambda: client.get("/api/jitsi/status").json()["active"] is False
+    ), "снятая встреча должна исчезнуть из статуса"
+
+
 def test_bridge_second_participant_and_reconnect(tmp_path: Path) -> None:
     """A reconnect with the same meeting id replaces the stale session."""
     client, repo = _make_stack(tmp_path)

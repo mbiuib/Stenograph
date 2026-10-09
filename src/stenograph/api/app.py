@@ -489,6 +489,11 @@ def create_app(
 
     # -- Jigasi bridge (streaming-whisper protocol) ---------------------------
 
+    @app.get("/api/jitsi/status")
+    def jitsi_status() -> dict:
+        """Active Jitsi bridge meetings: participants, counters, durations."""
+        return bridge.status()
+
     @app.websocket("/ws/{meeting_id}")
     async def whisper_stream(websocket: WebSocket, meeting_id: str) -> None:
         """Transcription endpoint consumed by Jigasi's WhisperTranscriptionService.

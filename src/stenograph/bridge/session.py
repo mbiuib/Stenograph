@@ -39,6 +39,15 @@ def _safe_name(participant_id: str) -> str:
     return cleaned[:64] or "participant"
 
 
+def _written_seconds(writer: Any) -> float:
+    """Audio seconds already written to a participant's WAV (0 when closed)."""
+    try:
+        frames = writer.tell()
+    except Exception:  # noqa: BLE001 — a closed writer must not break the snapshot
+        return 0.0
+    return max(0, int(frames)) / SAMPLE_RATE
+
+
 @dataclass(slots=True)
 class _Participant:
     """Runtime state of one conference participant."""
@@ -50,6 +59,7 @@ class _Participant:
     path: Path
     language: str | None = None
     stream: Any | None = None  # pool adapter when served by the shared decoder
+    last_frame: float = 0.0  # monotonic time of the last fed frame
 
 
 class _ParticipantStream:
@@ -153,6 +163,39 @@ class MeetingSession:
         self._worker.start()
         log.info("jitsi bridge: сессия %s запущена (задача %s)", meeting_id, self.job.id)
 
+    def status(self) -> dict:
+        """Snapshot for the Jitsi page: participants, counters, durations."""
+        now = time.monotonic()
+        with self._lock:
+            participants = []
+            for participant in self._participants.values():
+                last_frame = participant.last_frame
+                participants.append(
+                    {
+                        "id": participant.participant_id,
+                        "label": participant.label,
+                        "language": participant.language,
+                        "segments": sum(
+                            1
+                            for segment in self._segments
+                            if segment.speaker == participant.label
+                        ),
+                        "audio_sec": round(_written_seconds(participant.writer), 1),
+                        "last_frame_sec": round(now - last_frame, 1) if last_frame else None,
+                    }
+                )
+            return {
+                "meeting_id": self.meeting_id,
+                "job_id": self.job.id,
+                "job_status": self.job.status.value,
+                "started_at": self.job.started_at,
+                "duration_sec": round(now - self._started_monotonic, 1),
+                "language": self.job.language,
+                "pooled": self._pool is not None,
+                "segments": len(self._segments),
+                "participants": participants,
+            }
+
     # -- intake (event loop thread) -------------------------------------------
 
     def feed(self, participant_id: str, language: str | None, audio: np.ndarray) -> None:
@@ -166,6 +209,7 @@ class MeetingSession:
                 participant = self._create_participant(participant_id, language)
                 created = True
             self._pending[participant_id].append(audio)
+            participant.last_frame = time.monotonic()
         if created:
             # Never register with the pool while holding the session lock: the
             # decode pool takes this lock while serving and holds its own serve

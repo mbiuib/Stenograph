@@ -3,6 +3,7 @@ import type {
   AnalysisKind,
   AppConfig,
   EngineList,
+  JitsiStatus,
   Job,
   LiveDevices,
   LiveStatus,
@@ -79,6 +80,8 @@ export const api = {
   metrics: (): Promise<MetricsSnapshot> => request<MetricsSnapshot>("/api/metrics"),
 
   liveStatus: (): Promise<LiveStatus> => request<LiveStatus>("/api/live/status"),
+
+  jitsiStatus: (): Promise<JitsiStatus> => request<JitsiStatus>("/api/jitsi/status"),
   liveDevices: (): Promise<LiveDevices> => request<LiveDevices>("/api/live/devices"),
   liveStart: (tracks: string[], language?: string): Promise<Job> => {
     const form = new FormData();

@@ -70,10 +70,9 @@ class BridgeManager:
         with self._lock:
             return bool(self._sessions)
 
-    def active(self) -> list[dict]:
-        """Snapshot of active sessions (for the status endpoint)."""
+    def status(self) -> dict:
+        """Rich snapshot of active meetings for the Jitsi page."""
         with self._lock:
-            return [
-                {"meeting_id": session.meeting_id, "job_id": session.job.id}
-                for session in self._sessions.values()
-            ]
+            sessions = list(self._sessions.values())
+        meetings = [session.status() for session in sessions]
+        return {"active": bool(meetings), "meetings": meetings}

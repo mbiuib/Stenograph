@@ -64,6 +64,15 @@ export function IconGauge(props: IconProps) {
   );
 }
 
+export function IconVideo(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="2.5" y="6" width="13" height="12" rx="2" />
+      <path d="m15.5 10.5 6-3.5v10l-6-3.5" />
+    </Svg>
+  );
+}
+
 export function IconTrash(props: IconProps) {
   return (
     <Svg {...props}>

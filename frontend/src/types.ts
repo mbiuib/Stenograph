@@ -126,6 +126,32 @@ export interface LiveStatus {
   serving: string | null;
 }
 
+export interface JitsiParticipant {
+  id: string;
+  label: string;
+  language: string | null;
+  segments: number;
+  audio_sec: number;
+  last_frame_sec: number | null;
+}
+
+export interface JitsiMeeting {
+  meeting_id: string;
+  job_id: string;
+  job_status: string;
+  started_at: number;
+  duration_sec: number;
+  language: string | null;
+  pooled: boolean;
+  segments: number;
+  participants: JitsiParticipant[];
+}
+
+export interface JitsiStatus {
+  active: boolean;
+  meetings: JitsiMeeting[];
+}
+
 export interface LiveDevices {
   supported: boolean;
   devices: { loopback?: string; microphone?: string };
