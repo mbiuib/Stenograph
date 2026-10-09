@@ -113,26 +113,27 @@ export function JobsPage() {
       <li key={job.id}>
         <div
           className="flex cursor-pointer flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 hover:bg-surface2/40"
-          onClick={() => {
-            if (hasKids) toggleExpand(job.id);
-            else navigate(`/jobs/${job.id}`);
-          }}
-          title={hasKids ? "Нажмите, чтобы показать подзадачи" : undefined}
+          onClick={() => navigate(`/jobs/${job.id}`)}
+          title={hasKids ? "Открыть задачу · подзадачи — стрелкой" : `ID: ${job.id}`}
         >
           <div className="flex min-w-0 flex-1 basis-52 items-center gap-1.5">
-            <button
-              type="button"
-              aria-label={open ? "Свернуть подзадачи" : "Показать подзадачи"}
-              onClick={(event) => {
-                event.stopPropagation();
-                toggleExpand(job.id);
-              }}
-              className={`shrink-0 rounded p-0.5 text-muted transition-transform hover:text-ink ${
-                hasKids ? "" : "invisible"
-              } ${open ? "rotate-90" : ""}`}
-            >
-              <IconChevron className="size-4" />
-            </button>
+            {hasKids ? (
+              <button
+                type="button"
+                aria-label={open ? "Свернуть подзадачи" : "Показать подзадачи"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleExpand(job.id);
+                }}
+                className={`shrink-0 rounded p-0.5 text-muted transition-transform hover:text-ink ${
+                  open ? "rotate-90" : ""
+                }`}
+              >
+                <IconChevron className="size-4" />
+              </button>
+            ) : (
+              <span aria-hidden className="size-5 shrink-0" />
+            )}
             <div className="min-w-0 flex-1">
               {editingId === job.id ? (
                 <input
@@ -234,8 +235,8 @@ export function JobsPage() {
         <div>
           <h1 className="text-xl font-semibold">Задачи</h1>
           <p className="mt-1 text-sm text-muted">
-            История и очередь обработки. Подзадачи (улучшения, повторы, резюме и протоколы) — внутри
-            своих задач: нажмите на задачу или на стрелку.
+            История и очередь обработки. Подзадачи (улучшения, повторы, резюме и протоколы) вложены
+            в свои задачи и раскрываются стрелкой; клик по задаче открывает её.
           </p>
         </div>
         <Link
