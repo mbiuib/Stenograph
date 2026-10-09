@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import __version__, metrics
+from .. import __version__, loopwatch, metrics
 from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
 from ..bridge.session import MeetingSession
@@ -74,7 +74,22 @@ def create_app(
     # Background ASR yields to the air: heavy jobs wait while these are live.
     service.realtime_provider = lambda: live.has_active() or bridge.has_active()
 
-    app = FastAPI(title="Стенограф", version=__version__)
+    @contextlib.asynccontextmanager
+    async def lifespan(_web: FastAPI) -> AsyncIterator[None]:
+        """Run the event-loop lag watchdog for the whole app lifetime.
+
+        Everything (HTTP/WS/SSE) shares one loop; a synchronous block there
+        looks like a frozen server. The watchdog logs a critical line when it
+        really stalls and exposes the lag via /api/health.
+        """
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(loopwatch.run)
+            try:
+                yield
+            finally:
+                tg.cancel_scope.cancel()
+
+    app = FastAPI(title="Стенограф", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.service = service
     app.state.live = live
@@ -82,8 +97,13 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict:
-        """Liveness probe."""
-        return {"status": "ok", "version": __version__}
+        """Liveness probe: also reports the event-loop lag (stall detector)."""
+        return {
+            "status": "ok",
+            "version": __version__,
+            "loop_lag_ms": round(loopwatch.monitor.last_sec * 1000),
+            "loop_lag_max_ms": round(loopwatch.monitor.max_sec * 1000),
+        }
 
     @app.get("/api/jobs")
     def list_jobs(status: str | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
@@ -106,16 +126,26 @@ def create_app(
             )
         suffix = Path(file.filename or "upload").suffix.lower()
         upload_path = settings.uploads_dir / f"{uuid.uuid4().hex}{suffix}"
-        with upload_path.open("wb") as dest:
-            while chunk := await file.read(1024 * 1024):
-                dest.write(chunk)
-        job = service.submit_file(
-            upload_path,
-            source_name=file.filename or upload_path.name,
-            language=language,
-            engine=engine,
-        )
-        return job.model_dump()
+
+        def save_and_submit() -> dict:
+            """Spool the upload off the event loop.
+
+            Raw file I/O plus the ffprobe probe would block every request on
+            the shared loop for the duration of the upload — keep them in a
+            worker thread instead.
+            """
+            with upload_path.open("wb") as dest:
+                while chunk := file.file.read(1024 * 1024):
+                    dest.write(chunk)
+            job = service.submit_file(
+                upload_path,
+                source_name=file.filename or upload_path.name,
+                language=language,
+                engine=engine,
+            )
+            return job.model_dump()
+
+        return await anyio.to_thread.run_sync(save_and_submit)
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict:

@@ -1,5 +1,6 @@
 """API tests with an injected fake engine (no GPU, no ffmpeg)."""
 
+import asyncio
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -26,11 +27,39 @@ def _make_service(tmp_path: Path) -> TranscriptionService:
 
 
 def test_health(tmp_path: Path) -> None:
-    """The health endpoint responds without a GPU."""
+    """The health endpoint responds without a GPU and reports loop lag."""
     client = TestClient(create_app(service=_make_service(tmp_path)))
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["loop_lag_ms"] >= 0
+    assert body["loop_lag_max_ms"] >= 0
+
+
+def test_upload_runs_off_the_event_loop(tmp_path: Path) -> None:
+    """File I/O and the probe must not run on the event loop.
+
+    A large upload with ffprobe on the shared loop would stall every request;
+    the save+submit block runs in a worker thread instead.
+    """
+    service = _make_service(tmp_path)
+    seen: dict = {}
+    original = service.submit_file
+
+    def spy(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        return original(*args, **kwargs)
+
+    service.submit_file = spy
+    client = TestClient(create_app(settings=service.settings, service=service))
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"data", "audio/wav")})
+    assert response.status_code == 201
+    assert seen == {"on_loop": False}, seen
 
 
 def test_dashboard_endpoints(tmp_path: Path) -> None:
