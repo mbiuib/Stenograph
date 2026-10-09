@@ -159,11 +159,19 @@ class MeetingSession:
         """Buffer one participant's audio; creates the tracker on first frames."""
         if audio.size == 0:
             return
+        created = False
         with self._lock:
             participant = self._participants.get(participant_id)
             if participant is None:
                 participant = self._create_participant(participant_id, language)
+                created = True
             self._pending[participant_id].append(audio)
+        if created:
+            # Never register with the pool while holding the session lock: the
+            # decode pool takes this lock while serving and holds its own serve
+            # guard there — adopting under the lock deadlocks the event loop
+            # (S→G vs G→S). The pool may only serve the participant after this.
+            self._adopt_participant(participant)
         writer = participant.writer
         if writer is not None:
             try:
@@ -199,12 +207,21 @@ class MeetingSession:
         self._pending[participant_id] = []
         self.job.meta.setdefault("participants", {})[participant_id] = label
         self.job.meta.setdefault("audio", {})[label] = str(path)
-        if self._pool is not None:
-            stream = _ParticipantStream(self, participant_id, language)
-            if self._pool.adopt(self._stream_key(participant_id), stream):
-                participant.stream = stream  # served by the shared batched pool
         log.info("jitsi bridge: участник %s → «%s»", participant_id, label)
         return participant
+
+    def _adopt_participant(self, participant: _Participant) -> None:
+        """Register a participant with the shared decode pool.
+
+        Must be called WITHOUT the session lock held (see ``feed``): ``adopt``
+        is quick, but any lock inversion here would wedge the event loop.
+        """
+        pool = self._pool
+        if pool is None:
+            return
+        stream = _ParticipantStream(self, participant.participant_id, participant.language)
+        if pool.adopt(self._stream_key(participant.participant_id), stream):
+            participant.stream = stream  # served by the shared batched pool
 
     # -- shared-pool helping (decode pool thread) ------------------------------
 

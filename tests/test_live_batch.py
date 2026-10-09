@@ -184,16 +184,20 @@ class StubStream:
 
     @property
     def finished(self) -> bool:
+        """External streams never finish on their own."""
         return False
 
     def needs_turn(self) -> bool:
+        """Keep asking for a turn until a hypothesis came back."""
         return self.words is None
 
     def begin_batch_window(self, *, cap_sec: float | None = None):
+        """Hand the pool a fresh window of fake audio."""
         self.calls += 1
         return ("", speech_audio(1.0))
 
     def end_batch_window(self, track, words):
+        """Remember the decoded words and report whether more is needed."""
         if words:
             self.words = list(words)
         return self.needs_turn()

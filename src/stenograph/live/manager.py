@@ -185,10 +185,16 @@ class LiveManager:
         ``begin_batch_window(cap_sec=...)`` and ``end_batch_window(track,
         words)``. Returns False when the batched path is unavailable — the
         caller then keeps serving the stream on its own thread.
+
+        Deliberately does NOT take the serve guard: callers must be able to
+        register from the event loop while a serve round is running (the
+        stream is only served after the next turn refresh). Taking the guard
+        here once deadlocked the whole server — the decode thread holds the
+        guard while applying results and waits for the caller's session lock.
         """
         if self._batch_factory is None:
             return False
-        with self._serve_guard, self._lock:
+        with self._lock:
             self._adopted[key] = stream
         return True
 

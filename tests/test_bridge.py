@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from fakes import FakeEngine, PositionTranscriber, encoded_chunk
 from stenograph.api.app import create_app
 from stenograph.bridge.manager import BridgeManager
 from stenograph.bridge.protocol import FrameError, is_eof, normalize_language, parse_frame
+from stenograph.bridge.session import MeetingSession
 from stenograph.config import Settings
 from stenograph.events import EventBus
 from stenograph.live.manager import LiveManager
@@ -217,3 +219,56 @@ def test_bridge_participants_join_the_batched_pool(tmp_path: Path) -> None:
     assert len(jobs) == 2, [(job.id, job.status) for job in jobs]
     assert all(job.status == "done" for job in jobs), [job.error for job in jobs]
     assert all(job.segments for job in jobs)
+
+
+def test_bridge_feed_never_waits_for_the_serve_guard(tmp_path: Path) -> None:
+    """A new participant may arrive while a serve round is in flight.
+
+    ``feed`` (the event loop / websocket handler) must not block on the decode
+    pool's serve guard — the pooled decode thread holds that guard while it
+    applies results and waits for this session's lock, so any path from the
+    session lock into the guard wedges the whole server (recall the 40-person
+    Jitsi hang: py-spy showed exactly this inversion).
+
+    Falsification: with ``adopt`` taken under the session lock (the original
+    code) this ``feed`` blocks — the guard is held here by the test — and the
+    wait below times out.
+    """
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    batch = BatchRecorder()
+    live = LiveManager(
+        settings,
+        repo,
+        bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+        batch_factory=lambda language: batch,
+    )
+    session = MeetingSession(
+        "room-lock",
+        settings,
+        repo,
+        bus,
+        lambda language: PositionTranscriber(),
+        pool=live,
+    )
+    guard = live._serve_guard
+    guard.acquire()  # simulate a long serve round in flight
+    try:
+        done = threading.Event()
+
+        def feed_new_participant() -> None:
+            session.feed("late", "ru", encoded_chunk(0))
+            done.set()
+
+        worker = threading.Thread(target=feed_new_participant, daemon=True)
+        worker.start()
+        assert done.wait(5.0), (
+            "feed заблокировался на serve-guard — вернулась инверсия S→G (дедлок сервера)"
+        )
+        worker.join(timeout=5.0)
+    finally:
+        guard.release()
+    session.stop()
