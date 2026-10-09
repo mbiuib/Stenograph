@@ -70,9 +70,11 @@ def test_dashboard_endpoints(tmp_path: Path) -> None:
     engines = client.get("/api/engines").json()
     assert "whisper" in engines["available"] and "moss" in engines["available"]
     assert engines["default"] == service.engine_name
+    assert engines["improve_default"] == service.engine_name  # no reprocess_engine set
 
     config = client.get("/api/config").json()
     assert config["engine"] == service.engine_name
+    assert config["reprocess_engine"] is None
 
     response = client.post("/api/jobs", files={"file": ("clip.wav", b"data", "audio/wav")})
     assert response.status_code == 201

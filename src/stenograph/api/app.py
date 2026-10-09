@@ -281,14 +281,19 @@ def create_app(
 
     @app.get("/api/engines")
     def list_engines() -> dict:
-        """Registered ASR engines and the default one."""
-        return {"available": available_asr(), "default": service.engine_name}
+        """Registered ASR engines, the default one, and the improvement default."""
+        return {
+            "available": available_asr(),
+            "default": service.engine_name,
+            "improve_default": settings.reprocess_engine or service.engine_name,
+        }
 
     @app.get("/api/config")
     def get_config() -> dict:
         """Non-secret effective settings, for the UI."""
         return {
             "engine": service.engine_name,
+            "reprocess_engine": settings.reprocess_engine,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,
             "live_auto_reprocess": settings.live_auto_reprocess,

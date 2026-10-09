@@ -32,6 +32,13 @@ export function JobDetailPage() {
   const navigate = useNavigate();
   const [copied, setCopied] = useState(false);
   const { data: engines } = usePolling(() => api.engines(), 60000);
+  const engineOptions = engines?.available ?? [];
+  const [improveEngine, setImproveEngine] = useState("");
+  useEffect(() => {
+    // По умолчанию — движок улучшений из настроек (MEETSCRIBE_REPROCESS_ENGINE),
+    // иначе общий движок сервиса.
+    if (!improveEngine && engines) setImproveEngine(engines.improve_default ?? engines.default);
+  }, [engines, improveEngine]);
   const { data: appConfig } = usePolling(() => api.config(), 120000);
   const [reprocessBusy, setReprocessBusy] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
@@ -183,7 +190,7 @@ export function JobDetailPage() {
     setReprocessBusy(true);
     setReprocessError(null);
     try {
-      const child = await api.reprocessJob(targetId, engines?.default);
+      const child = await api.reprocessJob(targetId, improveEngine || engines?.default);
       navigate(`/jobs/${child.id}`);
     } catch (err) {
       setReprocessError(`Не удалось запустить улучшение: ${(err as Error).message}`);
@@ -308,24 +315,38 @@ export function JobDetailPage() {
         </div>
         <div className="flex gap-2">
           {!live && (job.kind === "live" || job.kind === "jitsi") && job.meta.audio && (
-            <button
-              onClick={() => void improve()}
-              disabled={reprocessBusy}
-              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <IconRefresh className="size-4" />
-              {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
-            </button>
+            <>
+              <EnginePicker
+                value={improveEngine}
+                options={engineOptions}
+                onChange={setImproveEngine}
+              />
+              <button
+                onClick={() => void improve()}
+                disabled={reprocessBusy}
+                className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <IconRefresh className="size-4" />
+                {reprocessBusy ? "Запускаем…" : `Улучшить через ${improveEngine || "…"}`}
+              </button>
+            </>
           )}
           {job.kind === "reprocess" && job.meta.parent != null && (
-            <button
-              onClick={() => void improve(String(job.meta.parent))}
-              disabled={reprocessBusy}
-              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <IconRefresh className="size-4" />
-              {reprocessBusy ? "Запускаем…" : `Улучшить заново (${engines?.default ?? "moss"})`}
-            </button>
+            <>
+              <EnginePicker
+                value={improveEngine}
+                options={engineOptions}
+                onChange={setImproveEngine}
+              />
+              <button
+                onClick={() => void improve(String(job.meta.parent))}
+                disabled={reprocessBusy}
+                className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <IconRefresh className="size-4" />
+                {reprocessBusy ? "Запускаем…" : `Улучшить заново (${improveEngine || "…"})`}
+              </button>
+            </>
           )}
           {!live && job.kind === "file" && job.status !== "running" && job.status !== "queued" && (
             <button
@@ -611,5 +632,31 @@ function MetaRow({ label, value }: { label: string; value: string }) {
         {value}
       </p>
     </div>
+  );
+}
+
+function EnginePicker({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  if (!value || options.length === 0) return null;
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      title="Движок для улучшения записи"
+      className="rounded-lg border border-edge bg-surface px-2 py-2 text-sm text-ink outline-none focus:border-accent/50"
+    >
+      {options.map((name) => (
+        <option key={name} value={name}>
+          {name}
+        </option>
+      ))}
+    </select>
   );
 }

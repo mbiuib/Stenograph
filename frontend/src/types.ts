@@ -93,6 +93,7 @@ export interface QueueSnapshot {
 export interface EngineList {
   available: string[];
   default: string;
+  improve_default?: string;
 }
 
 export interface AppConfig {

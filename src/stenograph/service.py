@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .config import Settings, get_settings
 from .domain.models import Job, JobStatus
-from .engines import get_asr
+from .engines import available_asr, get_asr
 from .engines.base import AsrEngine, TranscribeOptions
 from .events import EventBus
 from .llm.analyzer import transcript_text
@@ -162,8 +162,16 @@ class TranscriptionService:
         return audio, tracks
 
     def chain_reprocess(self, live_job: Job) -> Job:
-        """Auto-chained improvement after a live stop (lowest queue class)."""
-        return self.reprocess_job(live_job, auto=True)
+        """Auto-chained improvement after a session stop (lowest queue class).
+
+        The engine comes from MEETSCRIBE_REPROCESS_ENGINE when set (applies to
+        live and jitsi alike); an unknown name falls back to the default.
+        """
+        engine = self.settings.reprocess_engine
+        if engine is not None and engine not in available_asr():
+            log.warning("reprocess_engine=%r неизвестен — беру движок по умолчанию", engine)
+            engine = None
+        return self.reprocess_job(live_job, engine=engine, auto=True)
 
     def retry_file_job(
         self, job: Job, *, engine: str | None = None, language: str | None = None

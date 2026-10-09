@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     language: str = "auto"
 
     engine: str = "whisper"  # default ASR engine name (see the engines registry)
+    # MEETSCRIBE_REPROCESS_ENGINE: engine for auto-chained improvements of
+    # live/jitsi recordings; None = the default engine above.
+    reprocess_engine: str | None = None
 
     # Live mode: WASAPI/browser capture + local-agreement streaming on whisper.
     live_model: str = "large-v3-turbo"

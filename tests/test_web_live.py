@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from fakes import FakeCaptureSource, FakeEngine, PositionTranscriber, encoded_chunk
 from stenograph.api.app import create_app
 from stenograph.config import Settings
+from stenograph.domain.models import Job
 from stenograph.events import EventBus
 from stenograph.live.manager import LiveManager
 from stenograph.service import TranscriptionService
@@ -461,6 +462,43 @@ def test_web_live_auto_reprocess_chains(tmp_path: Path) -> None:
     assert _wait_until(lambda: handed_over == [job_id], timeout=10.0), handed_over
     job = _wait_done(client, job_id)
     assert job["status"] == "done", job
+
+
+def test_chain_reprocess_uses_configured_engine(tmp_path: Path) -> None:
+    """MEETSCRIBE_REPROCESS_ENGINE picks the auto-chained improvement engine."""
+    settings = Settings(data_dir=tmp_path, reprocess_engine="whisper")
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    service = TranscriptionService(
+        settings, repo, EventBus(), engine_factory=lambda n, s: FakeEngine()
+    )
+    track = tmp_path / "system.wav"
+    track.write_bytes(b"RIFF")
+    recording = Job(kind="live", source_name="Live — тест")
+    recording.meta["audio"] = {"system": str(track)}
+    repo.save(recording)
+
+    child = service.chain_reprocess(recording)
+    assert child.meta["request"]["engine"] == "whisper"
+    assert child.meta["auto"] is True
+
+
+def test_chain_reprocess_unknown_engine_falls_back(tmp_path: Path) -> None:
+    """A typo in the setting must not break auto-improvement for every stop."""
+    settings = Settings(data_dir=tmp_path, reprocess_engine="nope")
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    service = TranscriptionService(
+        settings, repo, EventBus(), engine_factory=lambda n, s: FakeEngine()
+    )
+    track = tmp_path / "system.wav"
+    track.write_bytes(b"RIFF")
+    recording = Job(kind="live", source_name="Live — тест")
+    recording.meta["audio"] = {"system": str(track)}
+    repo.save(recording)
+
+    child = service.chain_reprocess(recording)
+    assert child.meta["request"]["engine"] is None
 
 
 def test_web_live_each_session_chains_its_own_reprocess(tmp_path: Path) -> None:
