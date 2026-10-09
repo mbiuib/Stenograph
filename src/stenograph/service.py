@@ -102,49 +102,64 @@ class TranscriptionService:
         return self._enqueue(job)
 
     def reprocess_job(
-        self, live_job: Job, *, engine: str | None = None, auto: bool = False
+        self, recording: Job, *, engine: str | None = None, auto: bool = False
     ) -> Job:
-        """Queue an offline re-transcription of a live session recording.
+        """Queue an offline re-transcription of a live/jitsi recording.
 
         One child job per session: every recorded track is re-transcribed from
         scratch (the default engine — moss — unless overridden) and merged into
-        a single diarized transcript. Idempotent while a run is queued/running:
-        returns the already existing child job. ``auto`` marks the child as
-        chained after a live stop — the lowest queue class.
+        a single transcript (live: «Вы» / diarized labels; jitsi: per-speaker
+        files keep their participant labels). Idempotent while a run is
+        queued/running: returns the already existing child job. ``auto`` marks
+        the child as chained after a session stop — the lowest queue class.
         """
-        audio = {
-            str(track): str(path) for track, path in (live_job.meta.get("audio") or {}).items()
-        }
-        tracks = [
-            track
-            for track in ("system", "mic")
-            if audio.get(track) and Path(audio[track]).is_file()
-        ]
-        if not tracks:
-            raise ValueError("у записи нет сохранённых дорожек")
+        audio, tracks = self._recording_sources(recording)
 
-        existing_id = live_job.meta.get("reprocess_job")
+        existing_id = recording.meta.get("reprocess_job")
         if existing_id:
             existing = self.repo.get(str(existing_id))
             if existing and existing.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                 return existing
 
-        job = Job(kind="reprocess", source_name=f"Улучшение записи — {live_job.source_name}")
-        job.meta["parent"] = live_job.id
+        job = Job(kind="reprocess", source_name=f"Улучшение записи — {recording.source_name}")
+        job.meta["parent"] = recording.id
+        job.meta["source_kind"] = recording.kind
         job.meta["tracks"] = tracks
         job.meta["audio"] = {track: audio[track] for track in tracks}
         job.meta["request"] = {
             "engine": engine,
-            "language": live_job.language or self.settings.language_or_none(),
+            "language": recording.language or self.settings.language_or_none(),
         }
         if auto:
             job.meta["auto"] = True  # queue class: awaits the gap, runs last
         self._enqueue(job)
 
-        live_job.meta["reprocess_job"] = job.id
-        self.repo.save(live_job)
-        self.bus.publish(live_job.id, {"type": "meta", "meta": live_job.meta})
+        recording.meta["reprocess_job"] = job.id
+        self.repo.save(recording)
+        self.bus.publish(recording.id, {"type": "meta", "meta": recording.meta})
         return job
+
+    @staticmethod
+    def _recording_sources(job: Job) -> tuple[dict[str, str], list[str]]:
+        """Track map + playable tracks of a recording; ValueError when none.
+
+        Live sessions record "system"/"mic" tracks; jitsi meetings record one
+        file per participant, keyed by the speaker label («Спикер N»).
+        """
+        if job.kind not in ("live", "jitsi"):
+            raise ValueError("улучшение доступно для записей Live и Jitsi")
+        audio = {str(key): str(value) for key, value in (job.meta.get("audio") or {}).items()}
+        if job.kind == "live":
+            tracks = [
+                track
+                for track in ("system", "mic")
+                if audio.get(track) and Path(audio[track]).is_file()
+            ]
+        else:
+            tracks = [label for label, path in audio.items() if label and Path(path).is_file()]
+        if not tracks:
+            raise ValueError("у записи нет сохранённых дорожек")
+        return audio, tracks
 
     def chain_reprocess(self, live_job: Job) -> Job:
         """Auto-chained improvement after a live stop (lowest queue class)."""

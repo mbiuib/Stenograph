@@ -226,6 +226,17 @@ def run_reprocess_job(
         tracks = [track for track in declared if track in audio]
         if not tracks:
             raise ValueError("у задачи нет дорожек для обработки")
+        # Per-track fixed speaker: the live mic is «Вы»; a jitsi file is one
+        # participant, so its label wins over any engine-side diarization.
+        source_kind = str(job.meta.get("source_kind") or "live")
+        fixed = {track: track for track in tracks} if source_kind == "jitsi" else {"mic": "Вы"}
+
+        def relabel(track: str, segment: Segment) -> Segment:
+            speaker = fixed.get(track) or segment.speaker
+            if speaker == segment.speaker:
+                return segment
+            return segment.model_copy(update={"speaker": speaker})
+
         transition(JobStatus.RUNNING, "Подготовка…", 1)
 
         gathered: list[Segment] = []
@@ -246,9 +257,7 @@ def run_reprocess_job(
                 emit({"type": "progress", "value": value, "message": job.message})
 
             def on_segment(segment: Segment) -> None:
-                if track == "mic":
-                    segment = segment.model_copy(update={"speaker": "Вы"})
-                emit({"type": "segment", "segment": segment.model_dump()})
+                emit({"type": "segment", "segment": relabel(track, segment).model_dump()})
 
             return on_progress, on_segment
 
@@ -259,7 +268,7 @@ def run_reprocess_job(
             if not path.is_file():
                 raise FileNotFoundError(f"дорожка не найдена: {path}")
             base = 1 + span * index
-            label = "микрофон" if track == "mic" else "системный звук"
+            label = {"mic": "микрофон", "system": "системный звук"}.get(track, track)
             transition(
                 JobStatus.RUNNING, f"Дорожка {index + 1}/{len(tracks)}: {label}…", int(base)
             )
@@ -281,9 +290,7 @@ def run_reprocess_job(
             durations[track] = result.duration
             language = language or result.language
             for segment in result.segments:
-                if track == "mic":
-                    segment = segment.model_copy(update={"speaker": "Вы"})
-                gathered.append(segment)
+                gathered.append(relabel(track, segment))
 
         merged = sorted(gathered, key=lambda item: item.start)
         for position, segment in enumerate(merged):

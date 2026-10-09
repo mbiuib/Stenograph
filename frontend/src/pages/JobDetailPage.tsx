@@ -307,7 +307,7 @@ export function JobDetailPage() {
           </div>
         </div>
         <div className="flex gap-2">
-          {!live && job.kind === "live" && job.meta.audio && !job.meta.reprocess_job && (
+          {!live && (job.kind === "live" || job.kind === "jitsi") && job.meta.audio && (
             <button
               onClick={() => void improve()}
               disabled={reprocessBusy}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -156,6 +157,71 @@ def test_jitsi_status_reports_live_meetings(tmp_path: Path) -> None:
     assert _wait_until(
         lambda: client.get("/api/jitsi/status").json()["active"] is False
     ), "снятая встреча должна исчезнуть из статуса"
+
+
+def test_jitsi_reprocess_merges_participants(tmp_path: Path) -> None:
+    """A finished meeting is re-transcribed per speaker file and merged."""
+    client, repo = _make_stack(tmp_path)
+    with client.websocket_connect("/ws/room-improve") as websocket:
+        for index in range(8):
+            websocket.send_bytes(frame("p1", "ru-RU", encoded_chunk(index)))
+            websocket.send_bytes(frame("p2", "ru-RU", encoded_chunk(40 + index)))
+        websocket.send_bytes(b"\x00")
+
+    def meeting() -> Any:
+        jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
+        return jobs[0] if jobs else None
+
+    assert _wait_until(
+        lambda: meeting() is not None and meeting().status.value == "done", timeout=10.0
+    ), meeting()
+
+    response = client.post(f"/api/jobs/{meeting().id}/reprocess")
+    assert response.status_code == 201, response.text
+    child_id = response.json()["id"]
+    child: dict = {}
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        child = client.get(f"/api/jobs/{child_id}").json()
+        if child["status"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert child["status"] == "done", child
+    speakers = {segment["speaker"] for segment in child["segments"]}
+    assert speakers == {"Спикер 1", "Спикер 2"}, speakers
+    assert child["meta"]["source_kind"] == "jitsi"
+    assert "Спикер 1:" in child["text"] and "Спикер 2:" in child["text"], child["text"]
+
+
+def test_bridge_auto_chains_reprocess(tmp_path: Path) -> None:
+    """Ending a meeting hands the recording to the quality re-pass."""
+    handed: list[str] = []
+
+    def reprocess(job: Any) -> None:
+        handed.append(job.id)
+        return None
+
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    service = TranscriptionService(settings, repo, bus, engine_factory=lambda n, s: FakeEngine())
+    bridge = BridgeManager(
+        settings,
+        repo,
+        bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+        reprocess=reprocess,
+        auto_reprocess=True,
+    )
+    client = TestClient(create_app(settings=settings, service=service, bridge=bridge))
+
+    with client.websocket_connect("/ws/room-chain") as websocket:
+        for index in range(8):
+            websocket.send_bytes(frame("p1", "ru-RU", encoded_chunk(index)))
+        websocket.send_bytes(b"\x00")
+
+    assert _wait_until(lambda: len(handed) == 1, timeout=10.0), handed
 
 
 def test_bridge_second_participant_and_reconnect(tmp_path: Path) -> None:

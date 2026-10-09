@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from ..config import Settings
+from ..domain.models import Job
 from ..events import EventBus
 from ..live.manager import TranscriberFactory, default_transcriber_factory
 from ..storage import JobRepository
@@ -31,12 +33,16 @@ class BridgeManager:
         *,
         transcriber_factory: TranscriberFactory | None = None,
         pool: Any | None = None,
+        reprocess: Callable[[Job], Job | None] | None = None,
+        auto_reprocess: bool = False,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._bus = bus
         self._factory = transcriber_factory or default_transcriber_factory(settings)
         self._pool = pool  # shared live decode pool; None = per-meeting ticking
+        self._reprocess = reprocess  # quality re-pass chain after a meeting ends
+        self._auto_reprocess = auto_reprocess
         self._sessions: dict[str, MeetingSession] = {}
         self._lock = threading.Lock()
 
@@ -51,6 +57,8 @@ class BridgeManager:
                 self._bus,
                 self._factory,
                 pool=self._pool,
+                reprocess=self._reprocess,
+                auto_reprocess=self._auto_reprocess,
             )
             self._sessions[meeting_id] = session
         if previous is not None:

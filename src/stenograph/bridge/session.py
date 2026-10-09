@@ -126,6 +126,8 @@ class MeetingSession:
         bus: EventBus,
         transcriber_factory: Any,
         pool: Any | None = None,
+        reprocess: Callable[[Job], Job | None] | None = None,
+        auto_reprocess: bool = False,
     ) -> None:
         self.meeting_id = meeting_id
         self.job = Job(
@@ -143,6 +145,8 @@ class MeetingSession:
         self._bus = bus
         self._factory = transcriber_factory
         self._pool = pool  # shared live decode pool (None = tick in this thread)
+        self._reprocess = reprocess  # quality re-pass chain after the meeting ends
+        self._auto_reprocess = auto_reprocess
         self._bridge_cap = settings.bridge_batch_window_sec
         self._bridge_hold = settings.bridge_batch_hold_sec
         self._lock = threading.Lock()  # guards participants/pending/segments
@@ -408,12 +412,26 @@ class MeetingSession:
         self._bus.publish(
             self.job.id, {"type": "done", "text": self.job.text, "meta": self.job.meta}
         )
+        self._chain_reprocess()
         log.info(
             "jitsi bridge: сессия %s завершена — %d сегментов за %.1f с",
             self.meeting_id,
             len(ordered),
             duration,
         )
+
+    def _chain_reprocess(self) -> None:
+        """Hand the finished meeting to the quality re-pass (best effort)."""
+        if not (self._auto_reprocess and self._reprocess is not None):
+            return
+        if not self._participants:
+            return
+        try:
+            self._reprocess(self.job)
+        except ValueError as exc:  # nothing recorded / nothing to improve
+            log.info("jitsi bridge: улучшение записи пропущено (%s)", exc)
+        except Exception:  # noqa: BLE001 — chaining must never break the session
+            log.exception("jitsi bridge: не удалось запустить улучшение записи %s", self.job.id)
 
     def _fail(self, reason: str) -> None:
         self._close_writers()
