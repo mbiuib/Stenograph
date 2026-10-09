@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # MEETSCRIBE_REPROCESS_ENGINE: engine for auto-chained improvements of
     # live/jitsi recordings; None = the default engine above.
     reprocess_engine: str | None = None
+    # MEETSCRIBE_BRIDGE_LANGUAGE: force the language of Jitsi bridge meetings
+    # (live transcription and the meeting's improvement pass); None = trust the
+    # per-frame language Jigasi sends.
+    bridge_language: str | None = None
 
     # Live mode: WASAPI/browser capture + local-agreement streaming on whisper.
     live_model: str = "large-v3-turbo"

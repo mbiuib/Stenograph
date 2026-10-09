@@ -26,7 +26,7 @@ from ..events import EventBus
 from ..live.streamer import SAMPLE_RATE, StreamTracker
 from ..naming import timestamped
 from ..storage import JobRepository
-from .protocol import result_message
+from .protocol import normalize_language, result_message
 
 log = logging.getLogger(__name__)
 
@@ -130,11 +130,16 @@ class MeetingSession:
         auto_reprocess: bool = False,
     ) -> None:
         self.meeting_id = meeting_id
+        # Meeting language: forced by MEETSCRIBE_BRIDGE_LANGUAGE when set — the
+        # live pass and the improvement both honour it; None (default) keeps
+        # per-frame Jigasi languages and lets the improvement auto-detect.
+        self._language = normalize_language(settings.bridge_language or "")
         self.job = Job(
             kind="jitsi",
             source_name=timestamped("Jitsi"),
             status=JobStatus.RUNNING,
             started_at=time.time(),
+            language=self._language,
         )
         self.job.meta["engine"] = f"whisper:{settings.live_model}"
         self.job.meta["meeting_id"] = meeting_id
@@ -210,7 +215,9 @@ class MeetingSession:
         with self._lock:
             participant = self._participants.get(participant_id)
             if participant is None:
-                participant = self._create_participant(participant_id, language)
+                participant = self._create_participant(
+                    participant_id, self._language or language
+                )
                 created = True
             self._pending[participant_id].append(audio)
             participant.last_frame = time.monotonic()

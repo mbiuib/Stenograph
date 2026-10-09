@@ -262,6 +262,46 @@ def test_bridge_auto_chains_reprocess(tmp_path: Path) -> None:
     assert _wait_until(lambda: len(handed) == 1, timeout=10.0), handed
 
 
+def test_bridge_language_override(tmp_path: Path) -> None:
+    """MEETSCRIBE_BRIDGE_LANGUAGE overrides whatever Jigasi claims per frame."""
+    delivered: list[str | None] = []
+
+    def factory(language: str | None) -> Any:
+        delivered.append(language)
+        return PositionTranscriber()
+
+    settings = Settings(
+        data_dir=tmp_path,
+        live_step_sec=0.4,
+        live_max_window_sec=10.0,
+        bridge_language="ru",
+    )
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    service = TranscriptionService(settings, repo, bus, engine_factory=lambda n, s: FakeEngine())
+    bridge = BridgeManager(settings, repo, bus, transcriber_factory=factory)
+    client = TestClient(create_app(settings=settings, service=service, bridge=bridge))
+
+    with client.websocket_connect("/ws/room-lang") as websocket:
+        websocket.send_bytes(frame("p1", "en-US", encoded_chunk(0)))
+        websocket.send_bytes(frame("p1", "en-US", encoded_chunk(1)))
+
+        def participant_language() -> str | None:
+            meetings = client.get("/api/jitsi/status").json()["meetings"]
+            if not meetings or not meetings[0]["participants"]:
+                return None
+            return meetings[0]["participants"][0]["language"]
+
+        assert _wait_until(lambda: participant_language() == "ru", timeout=5.0), (
+            participant_language()
+        )
+
+    assert delivered and delivered[0] == "ru", delivered
+    jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
+    assert jobs and jobs[0].language == "ru", jobs
+
+
 def test_bridge_second_participant_and_reconnect(tmp_path: Path) -> None:
     """A reconnect with the same meeting id replaces the stale session."""
     client, repo = _make_stack(tmp_path)

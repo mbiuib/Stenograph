@@ -294,6 +294,7 @@ def create_app(
         return {
             "engine": service.engine_name,
             "reprocess_engine": settings.reprocess_engine,
+            "bridge_language": settings.bridge_language,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,
             "live_auto_reprocess": settings.live_auto_reprocess,
