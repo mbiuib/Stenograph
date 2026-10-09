@@ -134,6 +134,9 @@ class TranscriptionService:
         job.meta["source_kind"] = recording.kind
         job.meta["tracks"] = tracks
         job.meta["audio"] = {track: audio[track] for track in tracks}
+        if recording.meta.get("audio_timeline"):
+            # ребёнок играет как запись: единая дорожка, если она возможна
+            job.meta["audio_timeline"] = recording.meta["audio_timeline"]
         if language is not None:
             effective = clean_language(language)
         else:

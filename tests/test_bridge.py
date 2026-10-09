@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from fakes import FakeEngine, PositionTranscriber, encoded_chunk
+from fakes import FakeEngine, PositionTranscriber, encoded_chunk, speech_audio
 from stenograph.api.app import create_app
 from stenograph.bridge.manager import BridgeManager
 from stenograph.bridge.protocol import FrameError, is_eof, normalize_language, parse_frame
@@ -19,6 +20,7 @@ from stenograph.bridge.session import MeetingSession
 from stenograph.config import Settings
 from stenograph.events import EventBus
 from stenograph.live.manager import LiveManager
+from stenograph.live.streamer import SAMPLE_RATE
 from stenograph.service import TranscriptionService
 from stenograph.storage import JobRepository
 from test_live_batch import BatchRecorder
@@ -443,4 +445,71 @@ def test_bridge_feed_never_waits_for_the_serve_guard(tmp_path: Path) -> None:
         worker.join(timeout=5.0)
     finally:
         guard.release()
+    session.stop()
+
+
+def test_bridge_keeps_real_pauses_on_the_meeting_timeline(tmp_path: Path) -> None:
+    """Паузы между репликами сохраняются: дорожка идёт по часам встречи.
+
+    Jigasi присылает только речь (в 5-минутной встрече файл может быть 39 с),
+    поэтому без явной вставки тишины дорожки участников сжаты и «единую
+    запись» из них честно не собрать. Кадр ставится на позицию
+    (приход − длительность), разрыв заполняется тишиной.
+    """
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    session = MeetingSession(
+        "room-timeline", settings, repo, EventBus(), lambda language: PositionTranscriber()
+    )
+    assert session.job.meta["audio_timeline"] == "realtime"
+
+    session.feed("p1", "ru", speech_audio(1.0))
+    session._started_monotonic -= 4.0  # в часах встречи прошла пауза 4 с
+    session.feed("p1", "ru", speech_audio(1.0))
+    session.stop()
+
+    path = Path(session.job.meta["audio"]["Спикер 1"])
+    with wave.open(str(path), "rb") as wav:
+        assert wav.getframerate() == SAMPLE_RATE
+        data = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+    seconds = data.size / SAMPLE_RATE
+    assert 3.5 < seconds < 4.5, f"пауза потеряна: файл {seconds:.2f} с вместо ~4"
+    assert not data[int(1.2 * SAMPLE_RATE) : int(2.8 * SAMPLE_RATE)].any(), "в паузе не тишина"
+    tail = data[int(3.6 * SAMPLE_RATE) : int(3.9 * SAMPLE_RATE)]
+    assert (np.abs(tail) > 300).any(), "вторая реплика не на своём месте по часам"
+
+
+def test_bridge_catches_the_tracker_up_when_decoding_turns_on(tmp_path: Path) -> None:
+    """Включение распознавания на ходу не сдвигает часы: пропуск — тишиной.
+
+    Record-only встреча пишет файл по часам встречи, трекер же молчит — при
+    переключении на лету он должен сначала получить тишину за прошедшее
+    время, иначе времена реплик считались бы от точки включения.
+    """
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    session = MeetingSession(
+        "room-catchup",
+        settings,
+        repo,
+        EventBus(),
+        lambda language: PositionTranscriber(),
+        transcribe=False,
+    )
+    session._pump_participants = lambda: None  # детерминизм: pending читаем сами
+
+    session.feed("p1", "ru", speech_audio(1.0))  # файл: [0..1], распознавание выключено
+    session._started_monotonic -= 4.0
+    session.set_transcribe(True)  # включили во время встречи
+    session.feed("p1", "ru", speech_audio(1.0))
+
+    with session._lock:
+        chunks = list(session._pending["p1"])
+    seconds = [chunk.size / SAMPLE_RATE for chunk in chunks]
+    total = sum(seconds)
+    assert 3.7 < total < 4.4, f"трекер не догнал часы встречи: {seconds}"
+    assert 0.7 < seconds[0] < 1.4, f"первым в трекер идёт догон тишиной: {seconds}"
+    assert not chunks[0].any() and chunks[-1].any()
     session.stop()

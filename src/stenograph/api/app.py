@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import __version__, loopwatch, metrics
-from ..audio import ensure_mix, existing_tracks, source_file, track_kind
+from ..audio import ensure_mix, existing_tracks, mixable_tracks, source_file, track_kind
 from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
 from ..bridge.session import MeetingSession
@@ -237,10 +237,11 @@ def create_app(
 
     @app.get("/api/jobs/{job_id}/audio")
     def job_audio(job_id: str) -> FileResponse:
-        """Default playable stream of a job: the source file or a mixed live recording.
+        """Default playable stream of a job: the source file or a mixed recording.
 
-        Live-style recordings are mixed from their tracks with ffmpeg (cached
-        under ``data/mixes``); Jitsi meetings have no single aligned stream —
+        Recordings whose tracks share one clock (live; Jitsi on the realtime
+        timeline) are mixed into a single track with ffmpeg and cached under
+        ``data/mixes``. Old Jitsi meetings kept speech only — no honest mix —
         use ``/audio/{track}`` for the participant files.
         """
         job = service.get(job_id)
@@ -252,11 +253,12 @@ def create_app(
             if direct is None:
                 raise HTTPException(status_code=404, detail="исходный файл недоступен")
             return FileResponse(direct)
-        if kind == "live":
+        tracks = mixable_tracks(job)
+        if tracks:
             if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                 raise HTTPException(status_code=409, detail="запись ещё идёт")
             try:
-                return FileResponse(ensure_mix(settings, job))
+                return FileResponse(ensure_mix(settings, job, tracks))
             except ValueError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except RuntimeError as exc:

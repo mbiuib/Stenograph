@@ -44,12 +44,20 @@ function buildTracks(job: Job, speakerNames?: Record<string, string>): TrackOpti
     return options;
   }
   if (kind === "jitsi") {
-    return Object.keys(audio).map((name) => ({
-      key: name,
-      label: speakerLabel(name, speakerNames),
-      url: `${base}/${encodeURIComponent(name)}`,
-      speaker: true,
-    }));
+    const options: TrackOption[] = [];
+    if (job.meta.audio_timeline === "realtime") {
+      // Дорожки на часах встречи — можно слушать единой записью «как вживую».
+      options.push({ key: "", label: "Микс (вся встреча)", url: base, speaker: false });
+    }
+    for (const name of Object.keys(audio)) {
+      options.push({
+        key: name,
+        label: speakerLabel(name, speakerNames),
+        url: `${base}/${encodeURIComponent(name)}`,
+        speaker: true,
+      });
+    }
+    return options;
   }
   return [];
 }
@@ -160,14 +168,16 @@ export function TranscriptPlayer({
           onSeeked={syncActive}
         />
       </div>
-      <Transcript
-        segments={segments}
-        speakers={speakers}
-        live={live}
-        speakerNames={speakerNames}
-        activeIndex={activeIndex}
-        onSeek={(segment) => seek(segment.start, segment.speaker ?? null)}
-      />
+      {(segments.length > 0 || live) && (
+        <Transcript
+          segments={segments}
+          speakers={speakers}
+          live={live}
+          speakerNames={speakerNames}
+          activeIndex={activeIndex}
+          onSeek={(segment) => seek(segment.start, segment.speaker ?? null)}
+        />
+      )}
     </div>
   );
 }

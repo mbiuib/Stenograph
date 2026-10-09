@@ -1,13 +1,16 @@
 """Playback audio for jobs: the source file, a mixed recording or one track.
 
 Live recordings keep one WAV per track (system/mic), Jitsi keeps one per
-participant. A single playable stream for a Live-style recording is produced
-by mixing its tracks with ffmpeg and caching the result under ``data/mixes``.
+participant. A single playable stream is produced by mixing the tracks with
+ffmpeg and caching the result under ``data/mixes`` — for live tracks and for
+Jitsi meetings recorded on the realtime timeline (``meta.audio_timeline``)
+the tracks share one clock, so the mix is the meeting «как вживую».
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -45,6 +48,30 @@ def existing_tracks(job: Job) -> dict[str, str]:
     }
 
 
+def _speaker_number(name: str) -> tuple[int, str]:
+    """Sort key «Спикер 2» < «Спикер 10» (не словарный порядок)."""
+    match = re.search(r"(\d+)\s*$", name)
+    return (int(match.group(1)) if match else 999, name)
+
+
+def mixable_tracks(job: Job) -> list[str]:
+    """Tracks that share one real clock and can be mixed into a single stream.
+
+    Live tracks are continuous by construction. Jitsi tracks became continuous
+    once recordings switched to the realtime timeline; meetings recorded
+    before that kept speech only — no honest mix, per-speaker playback remains.
+    """
+    existing = existing_tracks(job)
+    kind = track_kind(job)
+    if kind == "live":
+        ordered = [name for name in LIVE_TRACKS if name in existing]
+        ordered += [name for name in existing if name not in LIVE_TRACKS]
+        return ordered
+    if kind == "jitsi" and str(job.meta.get("audio_timeline") or "") == "realtime":
+        return sorted(existing, key=_speaker_number)
+    return []
+
+
 def source_file(job: Job) -> Path | None:
     """The uploaded media of a file job, when it is still in the storage."""
     if track_kind(job) != "file" or not job.source_path:
@@ -58,15 +85,16 @@ def mix_path(settings: Settings, job: Job) -> Path:
     return settings.data_dir / "mixes" / f"{job.id}.mp3"
 
 
-def ensure_mix(settings: Settings, job: Job) -> Path:
-    """Build (or reuse) a mixed MP3 of a Live-style recording.
+def ensure_mix(settings: Settings, job: Job, tracks: list[str]) -> Path:
+    """Build (or reuse) a mixed MP3 from ``tracks`` of a recording.
 
-    The cache is invalidated by mtime: a recording whose tracks are newer than
-    the mix is re-mixed. Raises ValueError when nothing is recorded and
-    RuntimeError when ffmpeg fails.
+    All tracks must share the recording's clock (see :func:`mixable_tracks`).
+    The cache is invalidated by mtime: tracks newer than the mix trigger a
+    rebuild. Raises ValueError when nothing is recorded and RuntimeError when
+    ffmpeg fails.
     """
-    tracks = existing_tracks(job)
-    ordered = [tracks[key] for key in LIVE_TRACKS if key in tracks]
+    available = existing_tracks(job)
+    ordered = [available[name] for name in tracks if name in available]
     if not ordered:
         raise ValueError("у записи нет сохранённых дорожек")
     out = mix_path(settings, job)

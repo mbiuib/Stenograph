@@ -476,11 +476,13 @@ def test_chain_reprocess_uses_configured_engine(tmp_path: Path) -> None:
     track.write_bytes(b"RIFF")
     recording = Job(kind="live", source_name="Live — тест")
     recording.meta["audio"] = {"system": str(track)}
+    recording.meta["audio_timeline"] = "realtime"
     repo.save(recording)
 
     child = service.chain_reprocess(recording)
     assert child.meta["request"]["engine"] == "whisper"
     assert child.meta["auto"] is True
+    assert child.meta["audio_timeline"] == "realtime"  # ребёнок играет как запись
 
 
 def test_chain_reprocess_unknown_engine_falls_back(tmp_path: Path) -> None:

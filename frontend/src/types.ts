@@ -41,6 +41,8 @@ export interface JobMeta {
   chunks?: number;
   transcript_chars?: number;
   model?: string;
+  /** «realtime»: дорожки записи стоят на часах встречи (Jitsi после 10 окт). */
+  audio_timeline?: string;
   [key: string]: unknown;
 }
 

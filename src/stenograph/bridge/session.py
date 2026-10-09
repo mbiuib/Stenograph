@@ -32,6 +32,22 @@ log = logging.getLogger(__name__)
 
 DONE = ""  # dequeue sentinel: session closed and all messages drained
 
+MIN_PAUSE_SEC = 0.05  # короче — сетевой джиттер, кадры пишутся встык
+SILENCE_BLOCK_SEC = 30.0  # тишина пишется блоками, чтобы не держать большие массивы
+
+
+def _silence_blocks(seconds: float) -> list[np.ndarray]:
+    """Zero-filled float32 blocks covering ``seconds`` of digital silence."""
+    blocks: list[np.ndarray] = []
+    remaining = seconds
+    while remaining > 1e-3:
+        size = int(min(remaining, SILENCE_BLOCK_SEC) * SAMPLE_RATE)
+        if size <= 0:
+            break
+        blocks.append(np.zeros(size, dtype=np.float32))
+        remaining -= size / SAMPLE_RATE
+    return blocks
+
 
 def _safe_name(participant_id: str) -> str:
     """Filesystem-safe file name for a participant's audio."""
@@ -60,6 +76,8 @@ class _Participant:
     language: str | None = None
     stream: Any | None = None  # pool adapter when served by the shared decoder
     last_frame: float = 0.0  # monotonic time of the last fed frame
+    next_offset: float = 0.0  # session second the next written sample goes to
+    tracker_fed: float = 0.0  # audio seconds already handed to the tracker
 
 
 class _ParticipantStream:
@@ -149,6 +167,9 @@ class MeetingSession:
         self.job.meta["engine"] = f"whisper:{settings.live_model}"
         self.job.meta["meeting_id"] = meeting_id
         self.job.meta["transcribe"] = transcribe
+        # Дорожки пишутся по часам встречи (паузы между репликами — тишиной):
+        # файлы участников выровнены и микшируются в одну запись «как вживую».
+        self.job.meta["audio_timeline"] = "realtime"
         repo.save(self.job)
 
         self._settings = settings
@@ -215,10 +236,20 @@ class MeetingSession:
     # -- intake (event loop thread) -------------------------------------------
 
     def feed(self, participant_id: str, language: str | None, audio: np.ndarray) -> None:
-        """Buffer one participant's audio; creates the tracker on first frames."""
+        """Buffer one participant's audio; creates the tracker on first frames.
+
+        Jigasi sends speech bursts, not a continuous stream, so each frame is
+        placed at its real position on the meeting timeline
+        (``arrival − duration``) and the gap since the previous frame is
+        filled with silence. File, transcript times and the mixed playback all
+        share that timeline — «как будто ты прямо там».
+        """
         if audio.size == 0:
             return
+        duration = audio.size / SAMPLE_RATE
+        arrival = time.monotonic() - self._started_monotonic
         created = False
+        silence_sec = 0.0
         with self._lock:
             participant = self._participants.get(participant_id)
             if participant is None:
@@ -226,8 +257,17 @@ class MeetingSession:
                     participant_id, self._language or language
                 )
                 created = True
+            start = max(participant.next_offset, arrival - duration)
+            if start - participant.next_offset >= MIN_PAUSE_SEC:
+                silence_sec = start - participant.next_offset
+            else:
+                start = participant.next_offset  # джиттер сети: пишем встык
+            participant.next_offset = start + duration
             if self.transcribe:
+                if silence_sec:
+                    self._pending[participant_id].extend(_silence_blocks(silence_sec))
                 self._pending[participant_id].append(audio)
+                participant.tracker_fed = participant.next_offset
             participant.last_frame = time.monotonic()
         if created and self.transcribe:
             # Never register with the pool while holding the session lock: the
@@ -235,13 +275,29 @@ class MeetingSession:
             # guard there — adopting under the lock deadlocks the event loop
             # (S→G vs G→S). The pool may only serve the participant after this.
             self._adopt_participant(participant)
+        if silence_sec:
+            self._write_silence(participant, silence_sec)
+        self._write_audio(participant, audio)
+
+    @staticmethod
+    def _write_audio(participant: _Participant, audio: np.ndarray) -> None:
+        """Append captured audio to the participant's WAV (best effort)."""
         writer = participant.writer
-        if writer is not None:
-            try:
-                frames = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
-                writer.writeframes(frames.tobytes())
-            except Exception:  # noqa: BLE001 — a broken writer must not kill the session
-                log.exception("jitsi bridge: не удалось записать звук участника %s", participant_id)
+        if writer is None:
+            return
+        try:
+            frames = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+            writer.writeframes(frames.tobytes())
+        except Exception:  # noqa: BLE001 — a broken writer must not kill the session
+            log.exception(
+                "jitsi bridge: не удалось записать звук участника %s",
+                participant.participant_id,
+            )
+
+    def _write_silence(self, participant: _Participant, seconds: float) -> None:
+        """Append ``seconds`` of digital silence to the participant's WAV."""
+        for block in _silence_blocks(seconds):
+            self._write_audio(participant, block)
 
     def _make_tracker(self, participant_id: str, language: str | None) -> StreamTracker:
         """Build the per-participant streaming tracker (decoding paths only)."""
@@ -317,10 +373,12 @@ class MeetingSession:
     def set_transcribe(self, enabled: bool) -> None:
         """Switch realtime decoding of this meeting on/off; recording continues.
 
-        Called from the API thread (the Jitsi page toggle). Pooled participants
-        are released without holding the session lock: ``unadopt`` waits for an
-        in-flight serve round, and holding the lock across it would deadlock
-        the event loop (the serve guard ↔ session lock ordering rule).
+        Called from the API thread (the Jitsi page toggle). Enabling mid-meeting
+        first feeds the tracker the missed time as silence, so replay times
+        stay on the meeting clock. Pooled participants are released without
+        holding the session lock: ``unadopt`` waits for an in-flight serve
+        round, and holding the lock across it would deadlock the event loop
+        (the serve guard ↔ session lock ordering rule).
         """
         with self._lock:
             if enabled == self.transcribe:
@@ -328,15 +386,25 @@ class MeetingSession:
             self.transcribe = enabled
             self.job.meta["transcribe"] = enabled
             participants = list(self._participants.values())
+            for participant in participants:
+                if enabled:
+                    if participant.tracker is None:
+                        participant.tracker = self._make_tracker(
+                            participant.participant_id, participant.language
+                        )
+                    catch_up = participant.next_offset - participant.tracker_fed
+                    if catch_up >= MIN_PAUSE_SEC:
+                        self._pending[participant.participant_id].extend(
+                            _silence_blocks(catch_up)
+                        )
+                    participant.tracker_fed = participant.next_offset
+                else:
+                    # Всё неразобранное — в мусор: часы догоним при включении.
+                    self._pending[participant.participant_id] = []
         self._repo.save(self.job)
         self._bus.publish(self.job.id, {"type": "meta", "meta": self.job.meta})
         if enabled:
             for participant in participants:
-                if participant.tracker is None:
-                    with self._lock:
-                        participant.tracker = self._make_tracker(
-                            participant.participant_id, participant.language
-                        )
                 self._adopt_participant(participant)
             log.info("jitsi bridge: распознавание включено (%s)", self.meeting_id)
         else:
@@ -352,8 +420,6 @@ class MeetingSession:
                         participant.participant_id,
                     )
                 participant.stream = None
-                with self._lock:
-                    self._pending[participant.participant_id] = []
             log.info("jitsi bridge: распознавание выключено (%s)", self.meeting_id)
 
     # -- shared-pool helping (decode pool thread) ------------------------------

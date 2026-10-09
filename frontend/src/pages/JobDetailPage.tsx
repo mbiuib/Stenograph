@@ -621,10 +621,24 @@ export function JobDetailPage() {
               live={job.status === "running"}
               speakerNames={speakerNames}
             />
-          ) : job.status === "done" && job.text ? (
-            <pre className="max-h-[60vh] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
-              {job.text}
-            </pre>
+          ) : job.status !== "running" &&
+            (job.text || (job.meta.audio && Object.keys(job.meta.audio).length > 0)) ? (
+            <div className="flex flex-col gap-3">
+              <TranscriptPlayer
+                job={job}
+                segments={segments}
+                speakers={speakers}
+                live={false}
+                speakerNames={speakerNames}
+              />
+              {job.text ? (
+                <pre className="max-h-[60vh] overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
+                  {job.text}
+                </pre>
+              ) : (
+                <p className="text-sm text-muted">{job.message || "Транскрипта нет"}</p>
+              )}
+            </div>
           ) : (
             <EmptyState title={live ? "Ожидаем первые сегменты…" : "Транскрипта нет"} />
           )}

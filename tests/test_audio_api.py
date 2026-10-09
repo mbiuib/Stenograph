@@ -81,10 +81,10 @@ def test_audio_live_mix_is_built_and_served(tmp_path: Path, monkeypatch) -> None
     job.meta["audio"] = {"system": str(system), "mic": str(mic)}
     repo.save(job)
 
-    calls: list[str] = []
+    calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def fake_mix(settings_arg, job_arg):  # noqa: ANN001, ANN202 — подмена ffmpeg-микса
-        calls.append(job_arg.id)
+    def fake_mix(settings_arg, job_arg, tracks_arg):  # noqa: ANN001, ANN202 — подмена ffmpeg-микса
+        calls.append((job_arg.id, tuple(tracks_arg)))
         out = settings_arg.data_dir / "mixes" / f"{job_arg.id}.mp3"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"MIXED")
@@ -95,7 +95,7 @@ def test_audio_live_mix_is_built_and_served(tmp_path: Path, monkeypatch) -> None
 
     assert response.status_code == 200
     assert response.content == b"MIXED"
-    assert calls == [job.id]
+    assert calls == [(job.id, ("system", "mic"))]
     assert settings.data_dir.exists()
 
 
@@ -124,6 +124,36 @@ def test_audio_jitsi_serves_participant_tracks_only(tmp_path: Path) -> None:
     assert named.content == speaker.read_bytes()
 
 
+def test_audio_jitsi_realtime_meeting_gets_a_mix(tmp_path: Path, monkeypatch) -> None:
+    """Встречи с единым таймлайном микшируются в одну дорожку; старые — нет."""
+    client, repo, settings = _stack(tmp_path)
+    p1 = _wav(tmp_path / "p1.wav", b"\x01" * 30)
+    p2 = _wav(tmp_path / "p2.wav", b"\x02" * 30)
+    fresh = Job(kind="jitsi", source_name="Jitsi — новая", status=JobStatus.DONE)
+    fresh.meta["audio_timeline"] = "realtime"
+    fresh.meta["audio"] = {"Спикер 2": str(p2), "Спикер 1": str(p1)}
+    repo.save(fresh)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_mix(settings_arg, job_arg, tracks_arg):  # noqa: ANN001, ANN202 — подмена ffmpeg-микса
+        calls.append(tuple(tracks_arg))
+        out = settings_arg.data_dir / "mixes" / f"{job_arg.id}.mp3"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"MIXED")
+        return out
+
+    monkeypatch.setattr(app_module, "ensure_mix", fake_mix)
+    response = client.get(f"/api/jobs/{fresh.id}/audio")
+    assert response.status_code == 200
+    assert response.content == b"MIXED"
+    assert calls == [("Спикер 1", "Спикер 2")]  # порядок спикеров, а не словарный
+
+    old = Job(kind="jitsi", source_name="Jitsi — старая", status=JobStatus.DONE)
+    old.meta["audio"] = {"Спикер 1": str(p1)}
+    repo.save(old)
+    assert client.get(f"/api/jobs/{old.id}/audio").status_code == 404
+
+
 def test_audio_reprocess_follows_the_recording_kind(tmp_path: Path, monkeypatch) -> None:
     """An improvement job plays like its recording: mix for live, tracks for jitsi."""
     client, repo, settings = _stack(tmp_path)
@@ -133,7 +163,7 @@ def test_audio_reprocess_follows_the_recording_kind(tmp_path: Path, monkeypatch)
     live.meta["audio"] = {"system": str(system)}
     repo.save(live)
 
-    def fake_mix(settings_arg, job_arg):  # noqa: ANN001, ANN202 — подмена ffmpeg-микса
+    def fake_mix(settings_arg, job_arg, tracks_arg):  # noqa: ANN001, ANN202 — подмена ffmpeg-микса
         out = settings_arg.data_dir / "mixes" / f"{job_arg.id}.mp3"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"MIX")
