@@ -99,7 +99,19 @@ class Settings(BaseSettings):
 
     def language_or_none(self) -> str | None:
         """Return the configured language, mapping "auto" to None (engine detects)."""
-        return None if self.language in ("", "auto") else self.language
+        return clean_language(self.language)
+
+
+def clean_language(value: str | None) -> str | None:
+    """Normalize a language code for the engines.
+
+    ""/"auto" (any case, surrounded by spaces) mean auto-detect — None;
+    everything else is treated as a real code and returned trimmed.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return None if cleaned.lower() in ("", "auto") else cleaned
 
 
 @lru_cache

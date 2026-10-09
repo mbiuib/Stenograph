@@ -34,6 +34,7 @@ export function JobDetailPage() {
   const { data: engines } = usePolling(() => api.engines(), 60000);
   const engineOptions = engines?.available ?? [];
   const [improveEngine, setImproveEngine] = useState("");
+  const [improveLanguage, setImproveLanguage] = useState("auto"); // «Авто (определить)»
   useEffect(() => {
     // По умолчанию — движок улучшений из настроек (MEETSCRIBE_REPROCESS_ENGINE),
     // иначе общий движок сервиса.
@@ -44,6 +45,7 @@ export function JobDetailPage() {
   const [reprocessError, setReprocessError] = useState<string | null>(null);
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [retryLanguage, setRetryLanguage] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [nameValue, setNameValue] = useState("");
   const [nameOverride, setNameOverride] = useState<string | null>(null);
@@ -190,7 +192,11 @@ export function JobDetailPage() {
     setReprocessBusy(true);
     setReprocessError(null);
     try {
-      const child = await api.reprocessJob(targetId, improveEngine || engines?.default);
+      const child = await api.reprocessJob(
+        targetId,
+        improveEngine || engines?.default,
+        improveLanguage,
+      );
       navigate(`/jobs/${child.id}`);
     } catch (err) {
       setReprocessError(`Не удалось запустить улучшение: ${(err as Error).message}`);
@@ -201,7 +207,7 @@ export function JobDetailPage() {
     setRetryBusy(true);
     setRetryError(null);
     try {
-      const next = await api.retryJob(job.id);
+      const next = await api.retryJob(job.id, retryLanguage);
       navigate(`/jobs/${next.id}`);
     } catch (err) {
       setRetryError(`Не удалось запустить повторную обработку: ${(err as Error).message}`);
@@ -321,6 +327,11 @@ export function JobDetailPage() {
                 options={engineOptions}
                 onChange={setImproveEngine}
               />
+              <LanguagePicker
+                value={improveLanguage}
+                options={IMPROVE_LANGUAGES}
+                onChange={setImproveLanguage}
+              />
               <button
                 onClick={() => void improve()}
                 disabled={reprocessBusy}
@@ -338,6 +349,11 @@ export function JobDetailPage() {
                 options={engineOptions}
                 onChange={setImproveEngine}
               />
+              <LanguagePicker
+                value={improveLanguage}
+                options={IMPROVE_LANGUAGES}
+                onChange={setImproveLanguage}
+              />
               <button
                 onClick={() => void improve(String(job.meta.parent))}
                 disabled={reprocessBusy}
@@ -349,14 +365,21 @@ export function JobDetailPage() {
             </>
           )}
           {!live && job.kind === "file" && job.status !== "running" && job.status !== "queued" && (
-            <button
-              onClick={() => void retry()}
-              disabled={retryBusy}
-              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <IconRefresh className="size-4" />
-              {retryBusy ? "Запускаем…" : "Обработать заново"}
-            </button>
+            <>
+              <LanguagePicker
+                value={retryLanguage}
+                options={RETRY_LANGUAGES}
+                onChange={setRetryLanguage}
+              />
+              <button
+                onClick={() => void retry()}
+                disabled={retryBusy}
+                className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <IconRefresh className="size-4" />
+                {retryBusy ? "Запускаем…" : "Обработать заново"}
+              </button>
+            </>
           )}
           {live && job.kind === "live" && (
             <button
@@ -655,6 +678,54 @@ function EnginePicker({
       {options.map((name) => (
         <option key={name} value={name}>
           {name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+type LanguageOption = { value: string; label: string };
+
+const LANGUAGE_CHOICES: LanguageOption[] = [
+  { value: "ru", label: "Русский" },
+  { value: "en", label: "English" },
+  { value: "de", label: "Deutsch" },
+  { value: "fr", label: "Français" },
+  { value: "es", label: "Español" },
+];
+
+// Улучшение: «Авто» — детект моделью (значение уходит на сервер как "auto").
+const IMPROVE_LANGUAGES: LanguageOption[] = [
+  { value: "auto", label: "Авто (определить)" },
+  ...LANGUAGE_CHOICES,
+];
+
+// Повтор файла: пустое значение = как в оригинале (ничего не переопределяем).
+const RETRY_LANGUAGES: LanguageOption[] = [
+  { value: "", label: "Как в оригинале" },
+  { value: "auto", label: "Авто (определить)" },
+  ...LANGUAGE_CHOICES,
+];
+
+function LanguagePicker({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: LanguageOption[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      title="Язык распознавания"
+      className="rounded-lg border border-edge bg-surface px-2 py-2 text-sm text-ink outline-none focus:border-accent/50"
+    >
+      {options.map((item) => (
+        <option key={item.value} value={item.value}>
+          {item.label}
         </option>
       ))}
     </select>

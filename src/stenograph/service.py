@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from .config import Settings, get_settings
+from .config import Settings, clean_language, get_settings
 from .domain.models import Job, JobStatus
 from .engines import available_asr, get_asr
 from .engines.base import AsrEngine, TranscribeOptions
@@ -102,16 +102,24 @@ class TranscriptionService:
         return self._enqueue(job)
 
     def reprocess_job(
-        self, recording: Job, *, engine: str | None = None, auto: bool = False
+        self,
+        recording: Job,
+        *,
+        engine: str | None = None,
+        language: str | None = None,
+        auto: bool = False,
     ) -> Job:
         """Queue an offline re-transcription of a live/jitsi recording.
 
         One child job per session: every recorded track is re-transcribed from
         scratch (the default engine — moss — unless overridden) and merged into
         a single transcript (live: «Вы» / diarized labels; jitsi: per-speaker
-        files keep their participant labels). Idempotent while a run is
-        queued/running: returns the already existing child job. ``auto`` marks
-        the child as chained after a session stop — the lowest queue class.
+        files keep their participant labels). ``language`` overrides the track
+        language ("auto"/"" mean auto-detect); None keeps the recording's own
+        language, falling back to the settings default. Idempotent while a run
+        is queued/running: returns the already existing child job. ``auto``
+        marks the child as chained after a session stop — the lowest queue
+        class.
         """
         audio, tracks = self._recording_sources(recording)
 
@@ -126,9 +134,13 @@ class TranscriptionService:
         job.meta["source_kind"] = recording.kind
         job.meta["tracks"] = tracks
         job.meta["audio"] = {track: audio[track] for track in tracks}
+        if language is not None:
+            effective = clean_language(language)
+        else:
+            effective = clean_language(recording.language) or self.settings.language_or_none()
         job.meta["request"] = {
             "engine": engine,
-            "language": recording.language or self.settings.language_or_none(),
+            "language": effective,
         }
         if auto:
             job.meta["auto"] = True  # queue class: awaits the gap, runs last
@@ -196,8 +208,12 @@ class TranscriptionService:
             source_name=job.source_name,
             source_path=str(source),
         )
+        if language is not None:
+            new_language = clean_language(language)
+        else:
+            new_language = clean_language(request.get("language"))
         new_job.meta["request"] = {
-            "language": language if language is not None else request.get("language"),
+            "language": new_language,
             "engine": engine if engine is not None else request.get("engine"),
         }
         new_job.meta["retry_of"] = job.id
@@ -439,7 +455,7 @@ class TranscriptionService:
 
             request = job.meta.get("request") or {}
             engine = self._engine_for(request.get("engine") or self.engine_name)
-            language = request.get("language") or self.settings.language_or_none()
+            language = clean_language(request.get("language")) or self.settings.language_or_none()
             options = TranscribeOptions(language=language)
 
             runner = run_reprocess_job if job.kind == "reprocess" else run_file_job

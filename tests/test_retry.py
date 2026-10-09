@@ -126,3 +126,25 @@ def test_api_retry_endpoint(tmp_path: Path) -> None:
     new_job = _wait_finished(repo, payload["id"])
     assert new_job.status == JobStatus.DONE, new_job.error
     assert len(new_job.segments) == 2
+
+
+def test_retry_cleans_auto_language(tmp_path: Path) -> None:
+    """Stored "auto" must never be re-fed to engines — retry maps it to None."""
+    service, repo, _ = _make_service(tmp_path)
+    job = _failed_file_job(tmp_path, language="auto")
+    repo.save(job)
+
+    new_job = service.retry_file_job(job)
+
+    assert new_job.meta["request"]["language"] is None
+
+
+def test_retry_auto_override_means_detect(tmp_path: Path) -> None:
+    """An explicit "auto" override on retry maps to None as well."""
+    service, repo, _ = _make_service(tmp_path)
+    job = _failed_file_job(tmp_path, language="ru")
+    repo.save(job)
+
+    new_job = service.retry_file_job(job, language="auto")
+
+    assert new_job.meta["request"]["language"] is None

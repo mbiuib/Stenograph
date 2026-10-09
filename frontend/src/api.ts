@@ -41,14 +41,18 @@ export const api = {
   cancelJob: (id: string): Promise<{ cancelled: boolean }> =>
     request<{ cancelled: boolean }>(`/api/jobs/${id}/cancel`, { method: "POST" }),
 
-  reprocessJob: (id: string, engine?: string): Promise<Job> => {
+  reprocessJob: (id: string, engine?: string, language?: string): Promise<Job> => {
     const form = new FormData();
     if (engine) form.append("engine", engine);
+    if (language) form.append("language", language);
     return request<Job>(`/api/jobs/${id}/reprocess`, { method: "POST", body: form });
   },
 
-  retryJob: (id: string): Promise<Job> =>
-    request<Job>(`/api/jobs/${id}/retry`, { method: "POST" }),
+  retryJob: (id: string, language?: string): Promise<Job> => {
+    const form = new FormData();
+    if (language) form.append("language", language);
+    return request<Job>(`/api/jobs/${id}/retry`, { method: "POST", body: form });
+  },
 
   updateJob: (
     id: string,

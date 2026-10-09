@@ -191,7 +191,11 @@ def create_app(
         return updated.model_dump()
 
     @app.post("/api/jobs/{job_id}/reprocess", status_code=201)
-    def reprocess_job(job_id: str, engine: str | None = Form(default=None)) -> dict:
+    def reprocess_job(
+        job_id: str,
+        engine: str | None = Form(default=None),
+        language: str | None = Form(default=None),
+    ) -> dict:
         """Queue an offline re-transcription (default engine) of a live recording."""
         job = service.get(job_id)
         if job is None:
@@ -202,7 +206,7 @@ def create_app(
                 detail=f"unknown engine '{engine}'; available: {', '.join(available_asr())}",
             )
         try:
-            child = service.reprocess_job(job, engine=engine)
+            child = service.reprocess_job(job, engine=engine, language=language)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return child.model_dump()

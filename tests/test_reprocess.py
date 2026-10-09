@@ -221,6 +221,36 @@ def test_api_reprocess_endpoint(tmp_path: Path) -> None:
     assert len(payload["segments"]) == 4
 
 
+def test_api_reprocess_language_override(tmp_path: Path) -> None:
+    """POST reprocess accepts an explicit language; "auto" means detect."""
+    gate = threading.Event()
+    service, repo, _ = _make_service(tmp_path, gate)
+    client = TestClient(create_app(settings=service.settings, service=service))
+
+    live = _live_job_with_audio(tmp_path)
+    repo.save(live)
+    response = client.post(f"/api/jobs/{live.id}/reprocess", data={"language": "en"})
+    assert response.status_code == 201
+    child_a = response.json()["id"]
+    assert response.json()["meta"]["request"]["language"] == "en"
+
+    other = _live_job_with_audio(tmp_path)
+    repo.save(other)
+    response = client.post(f"/api/jobs/{other.id}/reprocess", data={"language": "auto"})
+    assert response.status_code == 201
+    child_b = response.json()["id"]
+    assert response.json()["meta"]["request"]["language"] is None
+
+    gate.set()
+    for child_id in (child_a, child_b):
+        deadline = time.monotonic() + 10
+        payload = client.get(f"/api/jobs/{child_id}").json()
+        while time.monotonic() < deadline and payload["status"] not in ("done", "error"):
+            time.sleep(0.05)
+            payload = client.get(f"/api/jobs/{child_id}").json()
+        assert payload["status"] == "done", payload
+
+
 class TrackSelectiveFakeEngine:
     """Engine double: the system track has no speech, the mic track does."""
 
