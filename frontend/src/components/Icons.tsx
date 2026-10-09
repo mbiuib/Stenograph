@@ -157,3 +157,11 @@ export function IconPencil(props: IconProps) {
     </Svg>
   );
 }
+
+export function IconChevron(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m9 6 6 6-6 6" />
+    </Svg>
+  );
+}

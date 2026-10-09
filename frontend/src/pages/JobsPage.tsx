@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { IconOpen, IconTrash, IconX } from "../components/Icons";
+import { IconChevron, IconOpen, IconTrash, IconX } from "../components/Icons";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from "../components/ui";
-import { fmtClock, fmtDateTime } from "../format";
+import { fmtClock, fmtDateTime, plural } from "../format";
 import { usePolling } from "../hooks";
 import type { Job } from "../types";
 
@@ -30,8 +30,26 @@ const KINDS = [
   { key: "live", label: "Live" },
   { key: "jitsi", label: "Jitsi" },
   { key: "reprocess", label: "Улучшения" },
-  { key: "analysis", label: "Анализы" },
+  { key: "analysis", label: "Резюме/протоколы" },
 ];
+
+/** Родитель задачи: улучшения/анализы ссылаются через «parent», повторы файлов — через «retry_of». */
+function parentOf(job: Job): string | null {
+  const parent = job.meta.parent;
+  if (typeof parent === "string" && parent) return parent;
+  const retry = job.meta.retry_of;
+  if (typeof retry === "string" && retry) return retry;
+  return null;
+}
+
+/** Человекочитаемый тип: у анализа — резюме/протокол, у файлового повтора — повтор. */
+function kindLabel(job: Job): string {
+  if (job.kind === "analysis") {
+    return job.meta.analysis_type === "protocol" ? "Протокол" : "Резюме";
+  }
+  if (job.meta.retry_of) return "Повторная транскрибация";
+  return KIND_LABELS[job.kind] ?? job.kind;
+}
 
 export function JobsPage() {
   const [tab, setTab] = useState("");
@@ -39,7 +57,8 @@ export function JobsPage() {
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
-  const { data: jobs, error } = usePolling(() => api.listJobs(tab || undefined, 200), 3000);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const { data: jobs, error } = usePolling(() => api.listJobs(tab || undefined, 300), 3000);
   const navigate = useNavigate();
 
   const filtered = (jobs ?? []).filter(
@@ -47,6 +66,30 @@ export function JobsPage() {
       (!kind || job.kind === kind) &&
       job.source_name.toLowerCase().includes(query.trim().toLowerCase()),
   );
+
+  // Дерево: подзадачи (улучшения, повторы, резюме/протоколы) вкладываются в свои задачи.
+  const byId = new Map(filtered.map((job) => [job.id, job]));
+  const children = new Map<string, Job[]>();
+  const roots: Job[] = [];
+  for (const job of filtered) {
+    const parentId = parentOf(job);
+    if (parentId && parentId !== job.id && byId.has(parentId)) {
+      const bucket = children.get(parentId);
+      if (bucket) bucket.push(job);
+      else children.set(parentId, [job]);
+    } else {
+      roots.push(job); // родителя нет в выборке — показываем как обычную задачу
+    }
+  }
+  for (const bucket of children.values()) bucket.reverse(); // подзадачи — от старой к новой
+
+  const toggleExpand = (id: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const commitRename = async (job: Job) => {
     const value = editValue.trim();
@@ -61,12 +104,139 @@ export function JobsPage() {
     await api.deleteJob(job.id).catch(() => {});
   };
 
+  const renderJob = (job: Job, depth: number): ReactNode => {
+    if (depth > 6) return null; // защита от зацикленных связей
+    const kids = children.get(job.id) ?? [];
+    const hasKids = kids.length > 0;
+    const open = hasKids && expanded.has(job.id);
+    return (
+      <li key={job.id}>
+        <div
+          className="flex cursor-pointer flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 hover:bg-surface2/40"
+          onClick={() => {
+            if (hasKids) toggleExpand(job.id);
+            else navigate(`/jobs/${job.id}`);
+          }}
+          title={hasKids ? "Нажмите, чтобы показать подзадачи" : undefined}
+        >
+          <div className="flex min-w-0 flex-1 basis-52 items-center gap-1.5">
+            <button
+              type="button"
+              aria-label={open ? "Свернуть подзадачи" : "Показать подзадачи"}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleExpand(job.id);
+              }}
+              className={`shrink-0 rounded p-0.5 text-muted transition-transform hover:text-ink ${
+                hasKids ? "" : "invisible"
+              } ${open ? "rotate-90" : ""}`}
+            >
+              <IconChevron className="size-4" />
+            </button>
+            <div className="min-w-0 flex-1">
+              {editingId === job.id ? (
+                <input
+                  autoFocus
+                  value={editValue}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => setEditValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void commitRename(job);
+                    if (event.key === "Escape") {
+                      setEditValue(job.source_name);
+                      setEditingId(null);
+                    }
+                  }}
+                  onBlur={() => void commitRename(job)}
+                  className="w-full rounded-md border border-edge bg-surface px-2 py-0.5 text-sm outline-none focus:border-accent/50"
+                />
+              ) : (
+                <span
+                  className="block truncate text-sm font-medium"
+                  title="Двойной клик — переименовать"
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    setEditValue(job.source_name);
+                    setEditingId(job.id);
+                  }}
+                >
+                  {job.source_name}
+                </span>
+              )}
+              <span className="text-xs text-muted">
+                {kindLabel(job)} · {fmtDateTime(job.created_at)}
+                {hasKids && (
+                  <>
+                    {" · "}
+                    {kids.length} {plural(kids.length, "подзадача", "подзадачи", "подзадач")}
+                  </>
+                )}
+              </span>
+            </div>
+          </div>
+          <div className="w-28">
+            {job.status === "running" ? (
+              <div className="flex flex-col gap-1">
+                <ProgressBar value={job.progress} />
+                <span className="tabular text-[11px] text-muted">{job.progress}%</span>
+              </div>
+            ) : (
+              <StatusBadge status={job.status} />
+            )}
+          </div>
+          <div className="hidden w-44 gap-2 md:flex">
+            {job.meta.engine != null && <Chip>{String(job.meta.engine)}</Chip>}
+            {job.meta.speakers && job.meta.speakers.length > 0 && (
+              <Chip>{job.meta.speakers.length} спк.</Chip>
+            )}
+          </div>
+          <span className="tabular w-16 text-right text-xs text-muted">
+            {fmtClock(job.meta.duration)}
+          </span>
+          <div className="flex items-center gap-1" onClick={(event) => event.stopPropagation()}>
+            <button
+              title="Открыть задачу"
+              onClick={() => navigate(`/jobs/${job.id}`)}
+              className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-ink"
+            >
+              <IconOpen className="size-4" />
+            </button>
+            {(job.status === "running" || job.status === "queued") && (
+              <button
+                title="Отменить"
+                onClick={() => onCancel(job.id)}
+                className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-warn"
+              >
+                <IconX className="size-4" />
+              </button>
+            )}
+            <button
+              title="Удалить"
+              onClick={() => void onDelete(job)}
+              className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-err"
+            >
+              <IconTrash className="size-4" />
+            </button>
+          </div>
+        </div>
+        {open && (
+          <ul className="ml-10 divide-y divide-edge/60 border-l border-edge/50">
+            {kids.map((kid) => renderJob(kid, depth + 1))}
+          </ul>
+        )}
+      </li>
+    );
+  };
+
   return (
     <div className="flex flex-col gap-5">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Задачи</h1>
-          <p className="mt-1 text-sm text-muted">История и очередь обработки.</p>
+          <p className="mt-1 text-sm text-muted">
+            История и очередь обработки. Подзадачи (улучшения, повторы, резюме и протоколы) — внутри
+            своих задач: нажмите на задачу или на стрелку.
+          </p>
         </div>
         <Link
           to="/jobs/new"
@@ -121,97 +291,7 @@ export function JobsPage() {
         {filtered.length === 0 ? (
           <EmptyState title="Ничего не найдено" hint="Измените фильтр или загрузите файл." />
         ) : (
-          <ul className="divide-y divide-edge/60">
-            {filtered.map((job) => (
-              <li
-                key={job.id}
-                className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 hover:bg-surface2/40"
-              >
-                <div
-                  className="min-w-0 flex-1 basis-52 cursor-pointer text-left"
-                  onClick={() => navigate(`/jobs/${job.id}`)}
-                  title={`ID: ${job.id}`}
-                >
-                  {editingId === job.id ? (
-                    <input
-                      autoFocus
-                      value={editValue}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => setEditValue(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") void commitRename(job);
-                        if (event.key === "Escape") {
-                          setEditValue(job.source_name);
-                          setEditingId(null);
-                        }
-                      }}
-                      onBlur={() => void commitRename(job)}
-                      className="w-full rounded-md border border-edge bg-surface px-2 py-0.5 text-sm outline-none focus:border-accent/50"
-                    />
-                  ) : (
-                    <span
-                      className="block truncate text-sm font-medium"
-                      title="Двойной клик — переименовать"
-                      onDoubleClick={(event) => {
-                        event.stopPropagation();
-                        setEditValue(job.source_name);
-                        setEditingId(job.id);
-                      }}
-                    >
-                      {job.source_name}
-                    </span>
-                  )}
-                  <span className="text-xs text-muted">
-                    {KIND_LABELS[job.kind] ?? job.kind} · {fmtDateTime(job.created_at)}
-                  </span>
-                </div>
-                <div className="w-28">
-                  {job.status === "running" ? (
-                    <div className="flex flex-col gap-1">
-                      <ProgressBar value={job.progress} />
-                      <span className="tabular text-[11px] text-muted">{job.progress}%</span>
-                    </div>
-                  ) : (
-                    <StatusBadge status={job.status} />
-                  )}
-                </div>
-                <div className="hidden w-44 gap-2 md:flex">
-                  {job.meta.engine != null && <Chip>{String(job.meta.engine)}</Chip>}
-                  {job.meta.speakers && job.meta.speakers.length > 0 && (
-                    <Chip>{job.meta.speakers.length} спк.</Chip>
-                  )}
-                </div>
-                <span className="tabular w-16 text-right text-xs text-muted">
-                  {fmtClock(job.meta.duration)}
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    title="Открыть задачу"
-                    onClick={() => navigate(`/jobs/${job.id}`)}
-                    className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-ink"
-                  >
-                    <IconOpen className="size-4" />
-                  </button>
-                  {(job.status === "running" || job.status === "queued") && (
-                    <button
-                      title="Отменить"
-                      onClick={() => onCancel(job.id)}
-                      className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-warn"
-                    >
-                      <IconX className="size-4" />
-                    </button>
-                  )}
-                  <button
-                    title="Удалить"
-                    onClick={() => void onDelete(job)}
-                    className="rounded-md p-1.5 text-muted hover:bg-surface2 hover:text-err"
-                  >
-                    <IconTrash className="size-4" />
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <ul className="divide-y divide-edge/60">{roots.map((job) => renderJob(job, 0))}</ul>
         )}
       </Card>
     </div>
