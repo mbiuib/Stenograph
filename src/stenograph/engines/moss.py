@@ -5,10 +5,12 @@ The model is a small audio LLM that emits a diarized transcript formatted as
 (the KV cache grows linearly with audio length) and duplicate segments on
 chunk boundaries are removed afterwards.
 
-Trade-off worth knowing: speaker labels (S01, S02, ...) are local to a chunk;
-identical labels from different chunks are treated as the same speaker. This
-matches the reference implementation and works for meetings with a stable
-speaker set. Cross-chunk speaker stitching is a planned improvement.
+Trade-off worth knowing: speaker labels (S01, S02, ...) are local to a chunk.
+After all chunks are decoded, cross-chunk stitching (``speaker_stitch``)
+re-labels every segment with a global speaker: segments are embedded with
+ECAPA-TDNN and clustered, so one voice keeps one label across the recording.
+When the embedder is unavailable (dependency or model missing), the local
+labels are kept as-is — transcription never fails because of stitching.
 
 Cancellation is cooperative: it takes effect between chunks and segments, and
 also inside generation via the token callback.
@@ -22,8 +24,11 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import wave
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from ..domain.errors import JobCancelled
 from ..domain.models import Segment
@@ -38,6 +43,7 @@ from .base import (
     TranscribeOptions,
     TranscribeProgress,
 )
+from .speaker_stitch import SpeakerStitcher
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +56,19 @@ MIN_CHUNK_SEC = 60.0
 MIN_MAX_NEW_TOKENS = 512
 
 _SPEAKER_RE = re.compile(r"S(\d+)")
+
+
+def _read_wav_float(path: Path) -> np.ndarray:
+    """Read a 16 kHz mono PCM WAV chunk as float32 [-1..1] (for embeddings)."""
+    with wave.open(str(path), "rb") as handle:
+        if (
+            handle.getframerate() != 16000
+            or handle.getnchannels() != 1
+            or handle.getsampwidth() != 2
+        ):
+            raise ValueError("неожиданный формат чанка для склейки спикеров")
+        data = handle.readframes(handle.getnframes())
+    return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def normalize_speaker(raw: str) -> str:
@@ -295,6 +314,11 @@ class MossEngine:
             chunk_paths, temp_dir = self._split_chunks(audio_path, plan)
 
         all_segments: list[dict[str, Any]] = []
+        # Мульти-чанковые файлы: локальные метки спикеров склеиваются в
+        # глобальные после всех чанков (см. speaker_stitch).
+        stitcher = (
+            SpeakerStitcher(models_dir=self.models_dir) if len(chunk_paths) > 1 else None
+        )
         total = len(chunk_paths)
         try:
             for index, chunk_path in enumerate(chunk_paths):
@@ -335,7 +359,24 @@ class MossEngine:
                     if (parsed.text or "").strip()
                 ]
 
-                for parsed in parsed_segments:
+                if stitcher is not None:
+                    try:
+                        stitcher.add_chunk(
+                            index,
+                            [
+                                (float(parsed.start), float(parsed.end))
+                                for parsed in parsed_segments
+                            ],
+                            _read_wav_float(chunk_path),
+                        )
+                    except Exception:  # noqa: BLE001 — склейка не должна ронять транскрибацию
+                        log.exception(
+                            "MOSS: не удалось собрать аудио для склейки спикеров (чанк %d)",
+                            index,
+                        )
+                        stitcher = None
+
+                for seq, parsed in enumerate(parsed_segments):
                     if is_cancelled and is_cancelled():
                         raise JobCancelled()
                     segment = Segment(
@@ -345,7 +386,11 @@ class MossEngine:
                         text=(parsed.text or "").strip(),
                         speaker=normalize_speaker(getattr(parsed, "speaker", "S01")),
                     )
-                    all_segments.append(segment.model_dump())
+                    item = segment.model_dump()
+                    if stitcher is not None:
+                        item["_chunk"] = index
+                        item["_seq"] = seq
+                    all_segments.append(item)
                     if on_segment:
                         on_segment(segment)
 
@@ -366,6 +411,25 @@ class MossEngine:
         all_segments = dedupe_overlap(all_segments)
         if len(all_segments) != before:
             log.info("MOSS: dropped %d boundary duplicates", before - len(all_segments))
+
+        if stitcher is not None:
+            mapping = stitcher.resolve()
+            for item in all_segments:
+                chunk = item.pop("_chunk", None)
+                seq = item.pop("_seq", None)
+                if chunk is None or mapping is None:
+                    continue
+                new_label = mapping.get((chunk, seq))
+                if new_label:
+                    item["speaker"] = new_label
+            if mapping:
+                globals_ = sorted({label for label in mapping.values()})
+                log.info(
+                    "MOSS: склейка спикеров — %d глобальных %s",
+                    len(globals_),
+                    globals_,
+                )
+
         for index, item in enumerate(all_segments):
             item["index"] = index
 

@@ -36,6 +36,8 @@ moss = [
     "torchaudio==2.11.0",
     "transformers>=5.6,<6.0",
     "moss-transcribe-diarize @ git+https://github.com/OpenMOSS/MOSS-Transcribe-Diarize.git@61bc29cd4120be7b5d3b761b64cd5dff57263642",
+    # Cross-chunk speaker stitching: ECAPA-TDNN speaker embeddings (CPU).
+    "speechbrain>=1.1",
 ]
 
 [project.scripts]
