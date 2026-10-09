@@ -21,9 +21,10 @@ function buildTracks(job: Job, speakerNames?: Record<string, string>): TrackOpti
     return [{ key: "", label: "Запись", url: base, speaker: false }];
   }
   if (kind === "live") {
-    const options: TrackOption[] = [
-      { key: "", label: "Микс (оба потока)", url: base, speaker: false },
-    ];
+    const options: TrackOption[] = [];
+    if (Object.keys(audio).length > 0) {
+      options.push({ key: "", label: "Микс (оба потока)", url: base, speaker: false });
+    }
     if (audio.system) {
       options.push({
         key: "system",
