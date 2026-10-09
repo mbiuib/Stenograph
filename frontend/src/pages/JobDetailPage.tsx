@@ -179,11 +179,11 @@ export function JobDetailPage() {
     await api.deleteJob(job.id).catch(() => {});
     navigate("/jobs");
   };
-  const improve = async () => {
+  const improve = async (targetId: string = job.id) => {
     setReprocessBusy(true);
     setReprocessError(null);
     try {
-      const child = await api.reprocessJob(job.id, engines?.default);
+      const child = await api.reprocessJob(targetId, engines?.default);
       navigate(`/jobs/${child.id}`);
     } catch (err) {
       setReprocessError(`Не удалось запустить улучшение: ${(err as Error).message}`);
@@ -315,6 +315,16 @@ export function JobDetailPage() {
             >
               <IconRefresh className="size-4" />
               {reprocessBusy ? "Запускаем…" : `Улучшить через ${engines?.default ?? "moss"}`}
+            </button>
+          )}
+          {job.kind === "reprocess" && job.meta.parent != null && (
+            <button
+              onClick={() => void improve(String(job.meta.parent))}
+              disabled={reprocessBusy}
+              className="flex items-center gap-2 rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconRefresh className="size-4" />
+              {reprocessBusy ? "Запускаем…" : `Улучшить заново (${engines?.default ?? "moss"})`}
             </button>
           )}
           {!live && job.kind === "file" && job.status !== "running" && job.status !== "queued" && (

@@ -193,6 +193,44 @@ def test_jitsi_reprocess_merges_participants(tmp_path: Path) -> None:
     assert "Спикер 1:" in child["text"] and "Спикер 2:" in child["text"], child["text"]
 
 
+def test_jitsi_reprocess_rerun_repoints_parent(tmp_path: Path) -> None:
+    """A rerun creates a fresh child; the recording points at the latest one.
+
+    Every child keeps its backlink to the recording, older attempts stay in
+    the history as separate jobs.
+    """
+    client, repo = _make_stack(tmp_path)
+    with client.websocket_connect("/ws/room-rerun") as websocket:
+        for index in range(6):
+            websocket.send_bytes(frame("p1", "ru-RU", encoded_chunk(index)))
+        websocket.send_bytes(b"\x00")
+
+    def meeting() -> Any:
+        jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
+        return jobs[0] if jobs else None
+
+    assert _wait_until(
+        lambda: meeting() is not None and meeting().status.value == "done", timeout=10.0
+    )
+
+    first = client.post(f"/api/jobs/{meeting().id}/reprocess")
+    assert first.status_code == 201, first.text
+    first_id = first.json()["id"]
+    assert _wait_until(
+        lambda: (repo.get(first_id) or meeting()).status.value == "done", timeout=10.0
+    )
+
+    second = client.post(f"/api/jobs/{meeting().id}/reprocess")
+    assert second.status_code == 201, second.text
+    second_id = second.json()["id"]
+    assert second_id != first_id
+
+    parent = repo.get(meeting().id)
+    assert parent.meta["reprocess_job"] == second_id, parent.meta
+    first_child = repo.get(first_id)
+    assert first_child.meta["parent"] == meeting().id
+
+
 def test_bridge_auto_chains_reprocess(tmp_path: Path) -> None:
     """Ending a meeting hands the recording to the quality re-pass."""
     handed: list[str] = []
