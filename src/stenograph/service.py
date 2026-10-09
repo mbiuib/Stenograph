@@ -1,8 +1,9 @@
 """Application service: job intake, a single-worker queue, cancellation.
 
 All GPU work happens on one worker thread (Whisper is not GPU-concurrency
-friendly); the queue is FIFO. Live sessions will get priority over files in a
-later milestone.
+friendly). While the air is live the worker holds heavy ASR jobs off the GPU
+(realtime gate); otherwise queued work runs by class — user files first, then
+analyses, then manual improvements, auto-chained improvements last.
 """
 
 from __future__ import annotations
@@ -28,6 +29,27 @@ from .storage import JobRepository
 log = logging.getLogger(__name__)
 
 EngineFactory = Callable[[str, Settings], AsrEngine]
+
+# Queue classes: lower runs first. User-facing work outranks background
+# quality re-passes, and an auto-chained improvement (created when a live
+# session stops) must never delay a freshly uploaded file or a manual action.
+PRIORITY_FILE = 10
+PRIORITY_ANALYSIS = 15
+PRIORITY_REPROCESS = 20
+PRIORITY_REPROCESS_AUTO = 30
+
+_WAITING_MESSAGE = "Ждёт: идёт живая запись"
+
+
+def queue_priority(job: Job) -> int:
+    """Execution class of a queued job (lower number runs earlier)."""
+    if job.kind == "file":
+        return PRIORITY_FILE
+    if job.kind == "analysis":
+        return PRIORITY_ANALYSIS
+    if job.kind == "reprocess":
+        return PRIORITY_REPROCESS_AUTO if job.meta.get("auto") else PRIORITY_REPROCESS
+    return PRIORITY_REPROCESS
 
 
 class TranscriptionService:
@@ -79,13 +101,16 @@ class TranscriptionService:
         job.meta["request"] = {"language": language, "engine": engine}
         return self._enqueue(job)
 
-    def reprocess_job(self, live_job: Job, *, engine: str | None = None) -> Job:
+    def reprocess_job(
+        self, live_job: Job, *, engine: str | None = None, auto: bool = False
+    ) -> Job:
         """Queue an offline re-transcription of a live session recording.
 
         One child job per session: every recorded track is re-transcribed from
         scratch (the default engine — moss — unless overridden) and merged into
         a single diarized transcript. Idempotent while a run is queued/running:
-        returns the already existing child job.
+        returns the already existing child job. ``auto`` marks the child as
+        chained after a live stop — the lowest queue class.
         """
         audio = {
             str(track): str(path) for track, path in (live_job.meta.get("audio") or {}).items()
@@ -112,12 +137,18 @@ class TranscriptionService:
             "engine": engine,
             "language": live_job.language or self.settings.language_or_none(),
         }
+        if auto:
+            job.meta["auto"] = True  # queue class: awaits the gap, runs last
         self._enqueue(job)
 
         live_job.meta["reprocess_job"] = job.id
         self.repo.save(live_job)
         self.bus.publish(live_job.id, {"type": "meta", "meta": live_job.meta})
         return job
+
+    def chain_reprocess(self, live_job: Job) -> Job:
+        """Auto-chained improvement after a live stop (lowest queue class)."""
+        return self.reprocess_job(live_job, auto=True)
 
     def retry_file_job(
         self, job: Job, *, engine: str | None = None, language: str | None = None
@@ -251,7 +282,10 @@ class TranscriptionService:
             active_id = self._active_job_id
             waiting_ids = list(self._waiting)
         active = self.repo.get(active_id) if active_id else None
-        waiting = [job for job in (self.repo.get(item) for item in waiting_ids) if job]
+        waiting = sorted(
+            (job for job in (self.repo.get(item) for item in waiting_ids) if job),
+            key=queue_priority,  # display order == execution order
+        )
         return {"active": active, "waiting": waiting}
 
     # -- worker -------------------------------------------------------------
@@ -267,27 +301,33 @@ class TranscriptionService:
             log.debug("realtime provider failed", exc_info=True)
             return False
 
-    def _wait_for_realtime_gap(self, job_id: str) -> None:
-        """Hold a heavy ASR job while the air is busy; run in the next gap."""
+    def _wait_for_realtime_gap(self, job_id: str) -> bool:
+        """One polling step of the realtime gate for ``job_id``.
+
+        True while a heavy ASR job must yield to an active live/bridge
+        stream (the caller returns it to the waiting pool and re-picks a
+        second later, so a freshly queued file can take the lead); False
+        when the job may run.
+        """
         job = self.repo.get(job_id)
         if job is None or job.kind not in ("file", "reprocess"):
-            return
+            return False
         if not self._realtime_busy():
-            return
-        log.info("job %s (%s) waits: a live/bridge stream is active", job_id, job.kind)
-        job.message = "Ждёт: идёт живая запись"
-        self.repo.save(job)
-        self.bus.publish(
-            job.id,
-            {
-                "type": "status",
-                "status": str(job.status),
-                "message": job.message,
-                "progress": job.progress,
-            },
-        )
-        while self._realtime_busy():
-            time.sleep(1.0)
+            return False
+        if job.message != _WAITING_MESSAGE:
+            log.info("job %s (%s) waits: a live/bridge stream is active", job_id, job.kind)
+            job.message = _WAITING_MESSAGE
+            self.repo.save(job)
+            self.bus.publish(
+                job.id,
+                {
+                    "type": "status",
+                    "status": str(job.status),
+                    "message": job.message,
+                    "progress": job.progress,
+                },
+            )
+        return True
 
     def _pause_gate(self, is_cancelled: Callable[[], bool]) -> Callable[[], None] | None:
         """Cooperative yield handed to engine chunk loops (None = no gate)."""
@@ -302,14 +342,52 @@ class TranscriptionService:
 
     def _work_loop(self) -> None:
         while True:
-            job_id = self._queue.get()
+            self._queue.get()  # wake-up: at least one job is waiting
             try:
-                self._wait_for_realtime_gap(job_id)
-                self._run_job(job_id)
+                self._serve_waiting()
             except Exception:  # the worker must survive anything a job throws
-                log.exception("worker crashed on job %s", job_id)
+                log.exception("worker failed while serving the queue")
             finally:
                 self._queue.task_done()
+
+    def _serve_waiting(self) -> None:
+        """Run the best-class waiting job; heavy ASR yields to the air."""
+        while True:
+            job_id = self._pick_queued()
+            if job_id is None:
+                return
+            if self._wait_for_realtime_gap(job_id):
+                # Held back by the air: return to the pool and re-pick a
+                # second later — a newly queued file takes the lead meanwhile.
+                with self._lock:
+                    self._waiting.insert(0, job_id)
+                time.sleep(1.0)
+                continue
+            self._run_job(job_id)
+            return
+
+    def _pick_queued(self) -> str | None:
+        """Take the highest-class waiting job (insertion order breaks ties)."""
+        with self._lock:
+            candidates = list(self._waiting)
+        best_id: str | None = None
+        best_rank = 0
+        for job_id in candidates:
+            job = self.repo.get(job_id)
+            if job is None or job.status != JobStatus.QUEUED:
+                with self._lock:
+                    if job_id in self._waiting:
+                        self._waiting.remove(job_id)
+                continue
+            rank = queue_priority(job)
+            if best_id is None or rank < best_rank:
+                best_id, best_rank = job_id, rank
+        if best_id is None:
+            return None
+        with self._lock:
+            if best_id in self._waiting:
+                self._waiting.remove(best_id)
+        return best_id
 
     def _run_job(self, job_id: str) -> None:
         job = self.repo.get(job_id)

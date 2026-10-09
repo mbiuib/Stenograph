@@ -66,7 +66,7 @@ def create_app(
         settings,
         service.repo,
         service.bus,
-        reprocess=service.reprocess_job,
+        reprocess=service.chain_reprocess,
         auto_reprocess=settings.live_auto_reprocess,
     )
     bridge = bridge or BridgeManager(settings, service.repo, service.bus)
