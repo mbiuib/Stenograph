@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { IconMic } from "../components/Icons";
-import { Card, EmptyState, ErrorBanner, StatusBadge } from "../components/ui";
-import { fmtClock, fmtDateTime, fmtTimestamp, speakerColor } from "../format";
+import { Card, EmptyState, ErrorBanner } from "../components/ui";
+import { fmtClock, fmtTimestamp, plural, speakerColor } from "../format";
 import { useJobStream, useNow, usePolling } from "../hooks";
 import type { LiveTrack } from "../live/capture";
 import {
@@ -50,14 +50,15 @@ export function LivePage() {
     () => (lastJobId ? api.getJob(lastJobId) : Promise.resolve(null)),
     3000,
   );
-  const { data: recentJobs } = usePolling(() => api.listJobs(undefined, 50), 10000);
-  const recentLive = (recentJobs ?? [])
-    .filter((job) => job.kind === "live" || job.kind === "jitsi")
-    .slice(0, 5);
 
   const mySession = status?.sessions.find((item) => item.job_id === activeJobId) ?? null;
   const otherSessions = (status?.sessions ?? []).filter((item) => item.job_id !== activeJobId);
   const insecure = !window.isSecureContext;
+  const liveSessions = [...(status?.sessions ?? [])].sort((left, right) => {
+    const own = (item: LiveSessionInfo) => (item.job_id === activeJobId ? 0 : 1);
+    return own(left) - own(right) || left.started_at - right.started_at;
+  });
+  const [stopping, setStopping] = useState<string | null>(null);
 
   const improve = async () => {
     if (!lastJobId) return;
@@ -104,8 +105,25 @@ export function LivePage() {
     }
   };
 
+  const stopSession = async (sessionJobId: string) => {
+    setStopping(sessionJobId);
+    setActionError(null);
+    try {
+      if (sessionJobId === activeJobId) {
+        await stopLiveSession();
+      } else {
+        await api.liveStop(sessionJobId);
+      }
+    } catch (err) {
+      setActionError(`Не удалось остановить запись: ${(err as Error).message}`);
+    } finally {
+      setStopping(null);
+    }
+  };
+
   const errors = [
     actionError,
+    active?.warning ?? null,
     session.closedReason ? `Сессия завершена: ${session.closedReason}` : null,
     stream.error,
   ].filter(Boolean);
@@ -119,23 +137,32 @@ export function LivePage() {
             Запись из браузера: микрофон («Вы») и звук системы («Они») — с распознаванием на лету.
           </p>
         </div>
-        {activeJobId && (
-          <span className="inline-flex items-center gap-2 rounded-lg border border-warn/40 px-3 py-2 text-sm text-warn">
-            <span className="animate-pulse-soft size-2 rounded-full bg-warn" />
-            Запись идёт
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {status && (
+            <span
+              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+                liveSessions.length > 0 ? "border-accent/40 text-accent" : "border-edge text-muted"
+              }`}
+            >
+              {liveSessions.length > 0 && (
+                <span className="animate-pulse-soft size-2 rounded-full bg-accent" />
+              )}
+              В эфире: {liveSessions.length}{" "}
+              {plural(liveSessions.length, "запись", "записи", "записей")}
+            </span>
+          )}
+          {activeJobId && (
+            <span className="inline-flex items-center gap-2 rounded-lg border border-warn/40 px-3 py-2 text-sm text-warn">
+              <span className="animate-pulse-soft size-2 rounded-full bg-warn" />
+              Запись идёт
+            </span>
+          )}
+        </div>
       </header>
 
       {errors.map((message) => (
         <ErrorBanner key={message} message={message as string} />
       ))}
-      {otherSessions.length > 0 && (
-        <div className="rounded-lg border border-edge bg-surface px-3 py-2 text-xs text-muted">
-          Сейчас идут ещё записи: {otherSessions.length}. Распознавание общее — текст может
-          появляться с задержкой.
-        </div>
-      )}
 
       {activeJobId ? (
         <ActiveSession
@@ -213,22 +240,65 @@ export function LivePage() {
         />
       )}
 
-      {recentLive.length > 0 && (
-        <Card title="Последние записи" bodyClassName="p-0">
+      {liveSessions.length > 0 && (
+        <Card title={`Сейчас в эфире — ${liveSessions.length}`} bodyClassName="p-0">
           <ul className="divide-y divide-edge/60">
-            {recentLive.map((job) => (
-              <li key={job.id} className="flex items-center gap-3 px-4 py-3">
-                <Link to={`/jobs/${job.id}`} className="min-w-0 flex-1 hover:text-accent">
-                  <span className="block truncate text-sm">{job.source_name}</span>
-                  <span className="block text-xs text-muted">
-                    {fmtDateTime(job.created_at)}
-                    {job.meta.duration ? ` · ${fmtClock(Number(job.meta.duration))}` : ""}
-                    {job.kind === "jitsi" ? " · Jitsi" : ""}
-                  </span>
-                </Link>
-                <StatusBadge status={job.status} />
-              </li>
-            ))}
+            {liveSessions.map((item) => {
+              const own = item.job_id === activeJobId;
+              const elapsed = Math.max(0, now / 1000 - item.started_at);
+              const state = item.transcribing
+                ? "распознавание идёт"
+                : item.queue_position != null
+                  ? `в очереди №${item.queue_position}`
+                  : "распознавание успевает";
+              return (
+                <li key={item.job_id} className="flex items-center gap-3 px-4 py-3">
+                  <span
+                    className={`size-2 shrink-0 rounded-full ${
+                      item.transcribing ? "animate-pulse-soft bg-warn" : "bg-muted/40"
+                    }`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        to={`/jobs/${item.job_id}`}
+                        className="truncate text-sm hover:text-accent"
+                      >
+                        {item.source_name}
+                      </Link>
+                      {own && (
+                        <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent">
+                          эта вкладка
+                        </span>
+                      )}
+                      {item.capture === "server" && (
+                        <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted">
+                          машина
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-muted">
+                      <span>идёт {fmtClock(elapsed)}</span>
+                      {item.tracks.map((track) => (
+                        <span key={track}>{track === "mic" ? "микрофон" : "система"}</span>
+                      ))}
+                      <span>{state}</span>
+                      {item.lag_sec >= 2 && <span>задержка ≈ {Math.round(item.lag_sec)} с</span>}
+                      {item.text_delay_sec != null && item.text_delay_sec >= 3 && (
+                        <span>текст отстаёт ≈ {Math.round(item.text_delay_sec)} с</span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => void stopSession(item.job_id)}
+                    disabled={stopping === item.job_id}
+                    className="shrink-0 rounded-lg border border-warn/40 px-3 py-1.5 text-xs text-warn transition-colors hover:bg-warn/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {stopping === item.job_id ? "Останавливаем…" : "Остановить"}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </Card>
       )}
@@ -271,7 +341,7 @@ function StartPanel({
       checked: mic,
       toggle: () => onMic(!mic),
       title: "Микрофон — «Вы»",
-      hint: "Микрофон этого компьютера — браузер попросит разрешение",
+      hint: "Микрофон этого компьютера — браузер попросит разрешение. Chrome даёт захватить микрофон ~10 вкладкам сразу — лишние записи запускайте без него.",
       disabled: false,
     },
     {

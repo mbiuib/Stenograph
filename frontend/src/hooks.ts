@@ -3,7 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { Job, JobEvent, Segment } from "./types";
 
-/** Poll an async function on an interval; errors are surfaced, data is retained. */
+/** Poll an async function on an interval; errors are surfaced, data is retained.
+ *
+ * Hidden tabs skip ticks (Chrome throttles their timers anyway) and refresh
+ * immediately when the tab becomes visible again — counters and lists stay
+ * actual the moment the user switches back to an older tab.
+ */
 export function usePolling<T>(
   fn: () => Promise<T>,
   intervalMs: number,
@@ -27,11 +32,18 @@ export function usePolling<T>(
           if (alive) setError(err.message);
         });
     };
+    const refresh = () => {
+      if (!document.hidden) tick();
+    };
     tick();
-    const timer = window.setInterval(tick, intervalMs);
+    const timer = window.setInterval(refresh, intervalMs);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
     return () => {
       alive = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
     };
   }, [intervalMs]);
 

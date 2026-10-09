@@ -21,6 +21,8 @@ export interface LiveCaptureOptions {
 export interface LiveCapture {
   jobId: string;
   tracks: LiveTrack[];
+  /** Non-fatal capture degradation (e.g. the mic was refused by the browser). */
+  warning: string | null;
   stop(): Promise<void>;
 }
 
@@ -89,7 +91,7 @@ function describeMediaError(err: unknown): string {
     case "NotFoundError":
       return "устройство не найдено";
     case "NotReadableError":
-      return "устройство занято другим приложением";
+      return "устройство занято другим приложением — или браузер упёрся в лимит одновременных захватов (~10 вкладок с микрофоном)";
     default:
       return err instanceof Error ? err.message : String(err);
   }
@@ -106,6 +108,7 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
     streamByTrack.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
   };
 
+  const degraded: string[] = [];
   try {
     if (options.tracks.includes("mic")) {
       try {
@@ -114,7 +117,16 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
         });
         streamByTrack.set("mic", mic);
       } catch (err) {
-        throw new Error(`не удалось получить доступ к микрофону (${describeMediaError(err)})`);
+        const notReadable = err instanceof DOMException && err.name === "NotReadableError";
+        if (notReadable && options.tracks.includes("system")) {
+          // Chrome refuses new mic captures past its concurrent-capture limit
+          // (~10 tabs); keep recording the system track instead of failing.
+          degraded.push(
+            "микрофон не захвачен (браузер ограничивает одновременный захват микрофона: ~10 вкладок) — запись идёт без дорожки «Вы»",
+          );
+        } else {
+          throw new Error(`не удалось получить доступ к микрофону (${describeMediaError(err)})`);
+        }
       }
     }
     if (options.tracks.includes("system")) {
@@ -139,6 +151,7 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
     stopStreams();
     throw err;
   }
+  const capturedTracks = options.tracks.filter((track) => streamByTrack.has(track));
 
   const context = new AudioContext();
   let moduleUrl: string | null = null;
@@ -178,7 +191,7 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
         socket.send(
           JSON.stringify({
             type: "start",
-            tracks: options.tracks,
+            tracks: capturedTracks,
             language: options.language || undefined,
             title: options.title || undefined,
           }),
@@ -295,5 +308,10 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
     });
   };
 
-  return { jobId: ready.job_id, tracks: options.tracks, stop };
+  return {
+    jobId: ready.job_id,
+    tracks: capturedTracks,
+    warning: degraded.length ? degraded.join(" ") : null,
+    stop,
+  };
 }

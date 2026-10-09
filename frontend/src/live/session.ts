@@ -13,6 +13,8 @@ export interface ActiveLiveSession {
   tracks: LiveTrack[];
   startedAt: number; // epoch seconds
   levels: Record<string, number>;
+  /** Non-fatal capture degradation reported by capture.ts (e.g. no mic). */
+  warning: string | null;
 }
 
 export interface LiveSessionSnapshot {
@@ -76,6 +78,7 @@ export async function startLiveSession(options: {
     tracks: started.tracks,
     startedAt: Date.now() / 1000,
     levels: Object.fromEntries(started.tracks.map((track) => [track, 0])),
+    warning: started.warning,
   };
   emit({ active, lastJobId: null, closedReason: null });
   return active;
