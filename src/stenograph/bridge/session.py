@@ -54,9 +54,9 @@ class _Participant:
 
     participant_id: str
     label: str
-    tracker: StreamTracker
     writer: Any  # wave.Wave_write
     path: Path
+    tracker: StreamTracker | None = None  # None in record-only meetings
     language: str | None = None
     stream: Any | None = None  # pool adapter when served by the shared decoder
     last_frame: float = 0.0  # monotonic time of the last fed frame
@@ -98,7 +98,7 @@ class _ParticipantStream:
     ) -> tuple[str, np.ndarray] | None:
         self._session._drain_pending(self._participant_id)
         participant = self._session._participants.get(self._participant_id)
-        if participant is None:
+        if participant is None or participant.tracker is None:
             return None
         audio = participant.tracker.pending_window(cap_sec=cap_sec)
         if audio is None:
@@ -108,7 +108,7 @@ class _ParticipantStream:
     def end_batch_window(self, track: str | None, words: list[Any] | None) -> bool:
         if words is not None:
             participant = self._session._participants.get(self._participant_id)
-            if participant is not None:
+            if participant is not None and participant.tracker is not None:
                 participant.tracker.apply_window(
                     list(words), hold_sec=self._session._bridge_hold
                 )
@@ -128,8 +128,13 @@ class MeetingSession:
         pool: Any | None = None,
         reprocess: Callable[[Job], Job | None] | None = None,
         auto_reprocess: bool = False,
+        transcribe: bool = True,
     ) -> None:
         self.meeting_id = meeting_id
+        # Record-only meetings (MEETSCRIBE_REALTIME_TRANSCRIBE=false) save the
+        # audio and leave decoding to the later quality pass; a running meeting
+        # can be switched either way from the Jitsi page (``set_transcribe``).
+        self.transcribe = transcribe
         # Meeting language: forced by MEETSCRIBE_BRIDGE_LANGUAGE when set — the
         # live pass and the improvement both honour it; None (default) keeps
         # per-frame Jigasi languages and lets the improvement auto-detect.
@@ -143,6 +148,7 @@ class MeetingSession:
         )
         self.job.meta["engine"] = f"whisper:{settings.live_model}"
         self.job.meta["meeting_id"] = meeting_id
+        self.job.meta["transcribe"] = transcribe
         repo.save(self.job)
 
         self._settings = settings
@@ -201,6 +207,7 @@ class MeetingSession:
                 "duration_sec": round(now - self._started_monotonic, 1),
                 "language": self.job.language,
                 "pooled": self._pool is not None,
+                "transcribe": self.transcribe,
                 "segments": len(self._segments),
                 "participants": participants,
             }
@@ -219,9 +226,10 @@ class MeetingSession:
                     participant_id, self._language or language
                 )
                 created = True
-            self._pending[participant_id].append(audio)
+            if self.transcribe:
+                self._pending[participant_id].append(audio)
             participant.last_frame = time.monotonic()
-        if created:
+        if created and self.transcribe:
             # Never register with the pool while holding the session lock: the
             # decode pool takes this lock while serving and holds its own serve
             # guard there — adopting under the lock deadlocks the event loop
@@ -235,34 +243,48 @@ class MeetingSession:
             except Exception:  # noqa: BLE001 — a broken writer must not kill the session
                 log.exception("jitsi bridge: не удалось записать звук участника %s", participant_id)
 
-    def _create_participant(self, participant_id: str, language: str | None) -> _Participant:
-        """Create tracker + audio file for a participant (call under lock)."""
-        label = f"Спикер {len(self._participants) + 1}"
-        path = self._audio_dir / f"{_safe_name(participant_id)}.wav"
-        writer = wave.open(str(path), "wb")  # noqa: SIM115 — kept open for the session
-        writer.setnchannels(1)
-        writer.setsampwidth(2)
-        writer.setframerate(SAMPLE_RATE)
-        tracker = StreamTracker(
+    def _make_tracker(self, participant_id: str, language: str | None) -> StreamTracker:
+        """Build the per-participant streaming tracker (decoding paths only)."""
+        return StreamTracker(
             self._factory(language),
             on_final=self._on_final_factory(participant_id),
             on_partial=self._on_partial_factory(participant_id),
             step_sec=self._settings.live_step_sec,
             max_window_sec=self._settings.live_max_window_sec,
         )
+
+    def _create_participant(self, participant_id: str, language: str | None) -> _Participant:
+        """Create the audio file (+ tracker when decoding) for a participant.
+
+        Called under the session lock. Record-only meetings never build the
+        tracker: no decoder touches the participant until the meeting is
+        switched to realtime or the quality pass runs over the files later.
+        """
+        label = f"Спикер {len(self._participants) + 1}"
+        path = self._audio_dir / f"{_safe_name(participant_id)}.wav"
+        writer = wave.open(str(path), "wb")  # noqa: SIM115 — kept open for the session
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(SAMPLE_RATE)
+        tracker = self._make_tracker(participant_id, language) if self.transcribe else None
         participant = _Participant(
             participant_id=participant_id,
             label=label,
-            tracker=tracker,
             writer=writer,
             path=path,
+            tracker=tracker,
             language=language,
         )
         self._participants[participant_id] = participant
         self._pending[participant_id] = []
         self.job.meta.setdefault("participants", {})[participant_id] = label
         self.job.meta.setdefault("audio", {})[label] = str(path)
-        log.info("jitsi bridge: участник %s → «%s»", participant_id, label)
+        log.info(
+            "jitsi bridge: участник %s → «%s»%s",
+            participant_id,
+            label,
+            "" if self.transcribe else " (без распознавания)",
+        )
         return participant
 
     def _adopt_participant(self, participant: _Participant) -> None:
@@ -274,9 +296,65 @@ class MeetingSession:
         pool = self._pool
         if pool is None:
             return
+        with self._lock:
+            if not self.transcribe or participant.stream is not None:
+                return
         stream = _ParticipantStream(self, participant.participant_id, participant.language)
         if pool.adopt(self._stream_key(participant.participant_id), stream):
-            participant.stream = stream  # served by the shared batched pool
+            with self._lock:
+                if self.transcribe:
+                    participant.stream = stream  # served by the shared batched pool
+                    return
+            # Toggled off while registering: detach immediately.
+            try:
+                pool.unadopt(self._stream_key(participant.participant_id))
+            except Exception:  # noqa: BLE001 — a failed detach must not crash feed
+                log.exception(
+                    "jitsi bridge: не удалось отцепить участника %s от пула",
+                    participant.participant_id,
+                )
+
+    def set_transcribe(self, enabled: bool) -> None:
+        """Switch realtime decoding of this meeting on/off; recording continues.
+
+        Called from the API thread (the Jitsi page toggle). Pooled participants
+        are released without holding the session lock: ``unadopt`` waits for an
+        in-flight serve round, and holding the lock across it would deadlock
+        the event loop (the serve guard ↔ session lock ordering rule).
+        """
+        with self._lock:
+            if enabled == self.transcribe:
+                return
+            self.transcribe = enabled
+            self.job.meta["transcribe"] = enabled
+            participants = list(self._participants.values())
+        self._repo.save(self.job)
+        self._bus.publish(self.job.id, {"type": "meta", "meta": self.job.meta})
+        if enabled:
+            for participant in participants:
+                if participant.tracker is None:
+                    with self._lock:
+                        participant.tracker = self._make_tracker(
+                            participant.participant_id, participant.language
+                        )
+                self._adopt_participant(participant)
+            log.info("jitsi bridge: распознавание включено (%s)", self.meeting_id)
+        else:
+            pool = self._pool
+            for participant in participants:
+                if participant.stream is None or pool is None:
+                    continue
+                try:
+                    pool.unadopt(self._stream_key(participant.participant_id))
+                except Exception:  # noqa: BLE001 — the flush path still finalizes
+                    log.exception(
+                        "jitsi bridge: не удалось отцепить участника %s от пула",
+                        participant.participant_id,
+                    )
+                participant.stream = None
+                with self._lock:
+                    self._pending[participant.participant_id] = []
+            log.info("jitsi bridge: распознавание выключено (%s)", self.meeting_id)
 
     # -- shared-pool helping (decode pool thread) ------------------------------
 
@@ -290,7 +368,7 @@ class MeetingSession:
             chunks = self._pending.get(participant_id, [])
             self._pending[participant_id] = []
         participant = self._participants.get(participant_id)
-        if participant is None:
+        if participant is None or participant.tracker is None:
             return
         for chunk in chunks:
             participant.tracker.feed(chunk)
@@ -302,7 +380,11 @@ class MeetingSession:
         if has_pending:
             return True
         participant = self._participants.get(participant_id)
-        return participant is not None and participant.tracker.ready()
+        return (
+            participant is not None
+            and participant.tracker is not None
+            and participant.tracker.ready()
+        )
 
     # -- caption messages (decode worker thread) --------------------------------
 
@@ -352,7 +434,8 @@ class MeetingSession:
             self._detach_streams()
             self._pump_participants()
             for participant in list(self._participants.values()):
-                participant.tracker.flush()
+                if participant.tracker is not None:
+                    participant.tracker.flush()
             self._finish()
         except Exception as exc:  # noqa: BLE001 — report and keep the app alive
             log.exception("jitsi bridge: сессия %s упала", self.meeting_id)
@@ -386,6 +469,8 @@ class MeetingSession:
         for participant_id, participant in list(self._participants.items()):
             if participant.stream is not None:
                 continue  # the shared decode pool feeds and serves this one
+            if participant.tracker is None:
+                continue  # record-only participant: only the WAV is written
             with self._lock:
                 chunks = self._pending.get(participant_id, [])
                 self._pending[participant_id] = []
@@ -411,7 +496,9 @@ class MeetingSession:
         self.job.text = "\n".join(f"{item.speaker}: {item.text}" for item in ordered)
         self.job.status = JobStatus.DONE
         self.job.progress = 100
-        self.job.message = "Транскрибация завершена"
+        self.job.message = (
+            "Транскрибация завершена" if self.transcribe else "Запись завершена (без распознавания)"
+        )
         self.job.finished_at = time.time()
         self.job.meta["duration"] = round(duration, 2)
         self.job.meta["processing_seconds"] = round(duration, 2)

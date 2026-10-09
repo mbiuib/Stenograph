@@ -78,8 +78,10 @@ def create_app(
         reprocess=service.chain_reprocess,
         auto_reprocess=settings.live_auto_reprocess,
     )
-    # Background ASR yields to the air: heavy jobs wait while these are live.
-    service.realtime_provider = lambda: live.has_active() or bridge.has_active()
+    # Background ASR yields to the air: heavy jobs wait while these decode.
+    # Record-only sessions (realtime_transcribe=false) don't decode, so they
+    # never hold the queue — their recordings flow through it like files.
+    service.realtime_provider = lambda: live.has_decoding() or bridge.has_decoding()
 
     @contextlib.asynccontextmanager
     async def lifespan(_web: FastAPI) -> AsyncIterator[None]:
@@ -299,6 +301,7 @@ def create_app(
             "engine": service.engine_name,
             "reprocess_engine": settings.reprocess_engine,
             "bridge_language": settings.bridge_language,
+            "realtime_transcribe": settings.realtime_transcribe,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,
             "live_auto_reprocess": settings.live_auto_reprocess,
@@ -376,15 +379,17 @@ def create_app(
         tracks: str | None = Form(default=None),
         language: str | None = Form(default=None),
         title: str | None = Form(default=None),
+        transcribe: bool | None = Form(default=None),
     ) -> dict:
         """Start a server-side capture session; tracks is a comma-separated list.
 
         Only one server-side (WASAPI) session can run at a time — browser
-        sessions are unlimited and don't conflict with it.
+        sessions are unlimited and don't conflict with it. ``transcribe``
+        overrides MEETSCRIBE_REALTIME_TRANSCRIBE for this session.
         """
         selected = [item.strip() for item in (tracks or "").split(",") if item.strip()]
         try:
-            job = live.start(selected or None, language, title)
+            job = live.start(selected or None, language, title, transcribe=transcribe)
         except CaptureError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:  # a server session is already running / bad tracks
@@ -438,6 +443,7 @@ def create_app(
                 requested or None,
                 command.get("language") or None,
                 command.get("title") or None,
+                transcribe=command.get("transcribe"),
             )
             log.info(
                 "live: браузерная сессия %s подключена (%s)",
@@ -510,6 +516,18 @@ def create_app(
     def jitsi_status() -> dict:
         """Active Jitsi bridge meetings: participants, counters, durations."""
         return bridge.status()
+
+    @app.post("/api/jitsi/transcribe")
+    def jitsi_transcribe(meeting_id: str = Form(), enabled: bool = Form()) -> dict:
+        """Switch realtime decoding of a running meeting (recording continues).
+
+        Record-only meetings keep saving audio; enabling starts decoding from
+        the current moment (the meeting's improvement pass still covers
+        everything recorded before).
+        """
+        if not bridge.set_transcribe(meeting_id, enabled):
+            raise HTTPException(status_code=404, detail="встреча не найдена")
+        return {"meeting_id": meeting_id, "transcribe": enabled}
 
     @app.websocket("/ws/{meeting_id}")
     async def whisper_stream(websocket: WebSocket, meeting_id: str) -> None:

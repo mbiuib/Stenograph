@@ -175,6 +175,15 @@ class LiveManager:
         with self._lock:
             return bool(self._sessions)
 
+    def has_decoding(self) -> bool:
+        """True while at least one session actually decodes (worker gate).
+
+        Record-only sessions are light enough to run alongside heavy jobs, so
+        files must not wait for them.
+        """
+        with self._lock:
+            return any(session.transcribe for session in self._sessions.values())
+
     # -- external streams (Jitsi bridge participants) --------------------------
 
     def adopt(self, key: str, stream: Any) -> bool:
@@ -224,6 +233,7 @@ class LiveManager:
                     "lag_sec": session.lag_seconds(),
                     "text_delay_sec": session.text_delay_seconds(),
                     "transcribing": session.job.id == serving or session.job.id in serving_ids,
+                    "transcribe": session.transcribe,
                     "queue_position": position,
                 }
             )
@@ -239,6 +249,7 @@ class LiveManager:
         tracks: list[str] | None = None,
         language: str | None = None,
         title: str | None = None,
+        transcribe: bool | None = None,
     ) -> Job:
         """Start a server-side capture session; one at a time (this machine's devices).
 
@@ -254,6 +265,7 @@ class LiveManager:
             source_name=(title or "").strip() or timestamped("Live (машина)"),
             capture_mode=None,
             server=True,
+            transcribe=transcribe,
         )
         return session.job
 
@@ -262,11 +274,12 @@ class LiveManager:
         tracks: list[str] | None = None,
         language: str | None = None,
         title: str | None = None,
+        transcribe: bool | None = None,
     ) -> _LiveSession:
         """Start a browser-upload session; audio arrives via ``session.feed``.
 
         Any number of browser sessions can run at once; the decode queue
-        transcribes them turn by turn.
+        transcribes them turn by turn (unless the session is record-only).
         """
         return self._begin(
             tracks,
@@ -275,6 +288,7 @@ class LiveManager:
             source_name=(title or "").strip() or timestamped("Live"),
             capture_mode="browser",
             server=False,
+            transcribe=transcribe,
         )
 
     def stop(self) -> Job | None:
@@ -320,8 +334,14 @@ class LiveManager:
         source_name: str,
         capture_mode: str | None,
         server: bool,
+        transcribe: bool | None = None,
     ) -> _LiveSession:
-        """Create and start a session (shared by server-side and browser capture)."""
+        """Create and start a session (shared by server-side and browser capture).
+
+        ``transcribe`` overrides MEETSCRIBE_REALTIME_TRANSCRIBE for this
+        session: False = record-only (the quality pass decodes afterwards).
+        """
+        decoding = self._settings.realtime_transcribe if transcribe is None else transcribe
         selected = tuple(track for track in (tracks or DEFAULT_TRACKS) if track)
         invalid = [track for track in selected if track not in capture_module.TRACKS]
         if invalid or not selected:
@@ -338,6 +358,7 @@ class LiveManager:
             )
             job.meta["engine"] = f"whisper:{self._settings.live_model}"
             job.meta["tracks"] = list(selected)
+            job.meta["transcribe"] = decoding
             if capture_mode is not None:
                 job.meta["capture"] = capture_mode
             else:
@@ -354,6 +375,7 @@ class LiveManager:
                 transcriber_factory=self._transcriber_factory,
                 capture_factory=capture_factory,
                 tracks=selected,
+                transcribe=decoding,
             )
             self._sessions[job.id] = session
             if server:
@@ -607,6 +629,7 @@ class _LiveSession:
         transcriber_factory: TranscriberFactory,
         capture_factory: CaptureFactory | None,
         tracks: tuple[str, ...],
+        transcribe: bool = True,
     ) -> None:
         self.job = job
         self._settings = settings
@@ -615,6 +638,10 @@ class _LiveSession:
         self._transcriber_factory = transcriber_factory
         self._capture_factory = capture_factory
         self.tracks = tracks
+        # Record-only sessions (MEETSCRIBE_REALTIME_TRANSCRIBE=false, the
+        # setting default) write the WAV files without any decoding; the
+        # quality pass transcribes them afterwards through the queue.
+        self.transcribe = transcribe
 
         self._stop_requested = threading.Event()
         self._finished = threading.Event()
@@ -645,13 +672,14 @@ class _LiveSession:
             writer.setframerate(SAMPLE_RATE)
             self._writers[track] = writer
             self.job.meta.setdefault("audio", {})[track] = str(path)
-            self._trackers[track] = StreamTracker(
-                self._transcriber_factory(self.job.language),
-                on_final=self._on_final_factory(track),
-                on_partial=self._on_partial_factory(track),
-                step_sec=self._settings.live_step_sec,
-                max_window_sec=self._settings.live_max_window_sec,
-            )
+            if self.transcribe:
+                self._trackers[track] = StreamTracker(
+                    self._transcriber_factory(self.job.language),
+                    on_final=self._on_final_factory(track),
+                    on_partial=self._on_partial_factory(track),
+                    step_sec=self._settings.live_step_sec,
+                    max_window_sec=self._settings.live_max_window_sec,
+                )
         capture_factory = self._capture_factory
         if capture_factory is not None:
             try:
@@ -674,7 +702,7 @@ class _LiveSession:
 
     def feed(self, track: str, audio: np.ndarray) -> None:
         """Accept externally captured audio (browser upload); unknown tracks are ignored."""
-        if track not in self._trackers:
+        if track not in self.tracks:
             return
         self._on_chunk(track, audio)
 
@@ -710,6 +738,8 @@ class _LiveSession:
             return False
         if self._stop_requested.is_set():
             return True  # still has to drain the backlog, flush and finalize
+        if not self.transcribe:
+            return False  # record-only: nothing to decode, nothing to finalize yet
         if self._has_pending():
             return True  # captured audio not yet moved into the trackers
         return any(tracker.ready() for tracker in self._trackers.values())
@@ -813,7 +843,8 @@ class _LiveSession:
             return
         level = float(np.sqrt(np.mean(np.square(audio.astype(np.float64))))) if audio.size else 0.0
         with self._lock:
-            self._pending[track].append(audio)
+            if self.transcribe:
+                self._pending[track].append(audio)
             self._levels[track] = max(level, self._levels[track] * 0.8)
         writer = self._writers.get(track)
         if writer is not None:
@@ -935,7 +966,9 @@ class _LiveSession:
             self.job.text = "\n".join(f"{item.speaker}: {item.text}" for item in ordered)
             self.job.status = JobStatus.DONE
             self.job.progress = 100
-            self.job.message = "Запись завершена"
+            self.job.message = (
+                "Запись завершена" if self.transcribe else "Запись завершена (без распознавания)"
+            )
             self.job.finished_at = time.time()
             self.job.meta["duration"] = round(duration, 2)
             self.job.meta["processing_seconds"] = round(duration, 2)

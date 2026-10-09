@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     live_step_sec: float = 0.8
     live_max_window_sec: float = 25.0
     live_auto_reprocess: bool = True  # re-run the recording through MOSS after stop
+    # MEETSCRIBE_REALTIME_TRANSCRIBE: decode Live/Jitsi audio while it is being
+    # recorded. False (default) = record-only: sessions only save the audio,
+    # the quality pass (auto-chained or manual) transcribes it afterwards.
+    realtime_transcribe: bool = False
     # Transcription queue: one decode worker serves all live sessions; these
     # bound how much GPU work a single session may take per queue turn (so a
     # backlogged recording cannot starve the others).

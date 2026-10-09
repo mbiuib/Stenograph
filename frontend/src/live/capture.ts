@@ -14,6 +14,8 @@ export interface LiveCaptureOptions {
   tracks: LiveTrack[];
   language?: string | null;
   title?: string | null;
+  /** Realtime decoding for this session; null/undefined = server default. */
+  transcribe?: boolean | null;
   onLevel?: (track: LiveTrack, rms: number) => void;
   /** Job events relayed by the server over this capture socket. */
   onEvent?: (event: unknown) => void;
@@ -196,6 +198,7 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
             tracks: capturedTracks,
             language: options.language || undefined,
             title: options.title || undefined,
+            transcribe: options.transcribe ?? undefined,
           }),
         );
       };

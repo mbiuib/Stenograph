@@ -31,6 +31,8 @@ export function LivePage() {
   const [system, setSystem] = useState(CAN_SHARE_SYSTEM);
   const [language, setLanguage] = useState("");
   const [title, setTitle] = useState("");
+  // null = переключатель не трогали: сервер возьмёт значение из настроек.
+  const [realtime, setRealtime] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [reprocessBusy, setReprocessBusy] = useState(false);
@@ -84,7 +86,12 @@ export function LivePage() {
     setBusy(true);
     setActionError(null);
     try {
-      await startLiveSession({ tracks, language: language || null, title: title.trim() || null });
+      await startLiveSession({
+        tracks,
+        language: language || null,
+        title: title.trim() || null,
+        transcribe: realtime,
+      });
     } catch (err) {
       setActionError(`Не удалось начать запись: ${(err as Error).message}`);
     } finally {
@@ -230,6 +237,8 @@ export function LivePage() {
           onSystem={setSystem}
           language={language}
           onLanguage={setLanguage}
+          realtime={realtime ?? config?.realtime_transcribe ?? false}
+          onRealtime={setRealtime}
           onStart={() => void start()}
           busy={busy}
           insecure={insecure}
@@ -246,11 +255,13 @@ export function LivePage() {
             {liveSessions.map((item) => {
               const own = item.job_id === activeJobId;
               const elapsed = Math.max(0, now / 1000 - item.started_at);
-              const state = item.transcribing
-                ? "распознавание идёт"
-                : item.queue_position != null
-                  ? `в очереди №${item.queue_position}`
-                  : "распознавание успевает";
+              const state = !item.transcribe
+                ? "запись без распознавания"
+                : item.transcribing
+                  ? "распознавание идёт"
+                  : item.queue_position != null
+                    ? `в очереди №${item.queue_position}`
+                    : "распознавание успевает";
               return (
                 <li key={item.job_id} className="flex items-center gap-3 px-4 py-3">
                   <span
@@ -313,6 +324,8 @@ function StartPanel({
   onSystem,
   language,
   onLanguage,
+  realtime,
+  onRealtime,
   onStart,
   busy,
   insecure,
@@ -327,6 +340,8 @@ function StartPanel({
   onSystem: (value: boolean) => void;
   language: string;
   onLanguage: (value: string) => void;
+  realtime: boolean;
+  onRealtime: (value: boolean) => void;
   onStart: () => void;
   busy: boolean;
   insecure: boolean;
@@ -394,6 +409,20 @@ function StartPanel({
               </option>
             ))}
           </select>
+        </label>
+        <label className="flex items-start justify-between gap-3 rounded-lg border border-edge p-3">
+          <span className="text-sm font-medium">
+            Распознавать во время записи
+            <span className="mt-0.5 block text-xs font-normal text-muted">
+              выкл: пишем только звук — расшифровка после остановки, в общей очереди
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={realtime}
+            onChange={(event) => onRealtime(event.target.checked)}
+            className="mt-0.5 size-4 accent-cyan-400"
+          />
         </label>
         <label className="flex flex-col gap-1.5 rounded-lg border border-edge p-3">
           <span className="text-sm font-medium">Название встречи</span>
@@ -480,11 +509,13 @@ function ActiveSession({
 }) {
   const elapsed = startedAt != null ? Math.max(0, now / 1000 - startedAt) : 0;
   const transcriptionState = session
-    ? session.transcribing
-      ? "распознавание идёт"
-      : session.queue_position != null
-        ? `в очереди на распознавание (№${session.queue_position})`
-        : "распознавание успевает"
+    ? !session.transcribe
+      ? "запись без распознавания — расшифровка после остановки"
+      : session.transcribing
+        ? "распознавание идёт"
+        : session.queue_position != null
+          ? `в очереди на распознавание (№${session.queue_position})`
+          : "распознавание успевает"
     : null;
   const lagHint =
     session && session.lag_sec >= 2 ? `задержка ≈ ${Math.round(session.lag_sec)} с` : null;

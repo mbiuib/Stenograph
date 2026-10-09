@@ -101,6 +101,7 @@ export interface AppConfig {
   whisper_model: string;
   live_model: string;
   live_auto_reprocess: boolean;
+  realtime_transcribe: boolean;
   language: string;
   device: string;
   compute_type: string;
@@ -117,6 +118,7 @@ export interface LiveSessionInfo {
   lag_sec: number;
   text_delay_sec: number | null;
   transcribing: boolean;
+  transcribe: boolean;
   queue_position: number | null;
 }
 
@@ -144,6 +146,7 @@ export interface JitsiMeeting {
   duration_sec: number;
   language: string | null;
   pooled: boolean;
+  transcribe: boolean;
   segments: number;
   participants: JitsiParticipant[];
 }

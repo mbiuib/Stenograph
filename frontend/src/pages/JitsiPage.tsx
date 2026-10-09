@@ -1,4 +1,5 @@
 /** Jitsi bridge meetings: live participants, counters and recent recordings. */
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { Card, Chip, EmptyState, ErrorBanner, StatusBadge } from "../components/ui";
@@ -7,11 +8,22 @@ import { useNow, usePolling } from "../hooks";
 import type { JitsiMeeting } from "../types";
 
 export function JitsiPage() {
+  const [actionError, setActionError] = useState<string | null>(null);
   const { data: status, error } = usePolling(() => api.jitsiStatus(), 2000);
   const { data: jobs } = usePolling(() => api.listJobs(undefined, 100), 5000);
   const now = useNow(1000);
   const meetings = status?.meetings ?? [];
   const recent = (jobs ?? []).filter((job) => job.kind === "jitsi").slice(0, 6);
+  const transcribing = meetings.filter((meeting) => meeting.transcribe).length;
+
+  const toggleTranscribe = async (meetingId: string, enabled: boolean) => {
+    setActionError(null);
+    try {
+      await api.jitsiTranscribe(meetingId, enabled);
+    } catch (err) {
+      setActionError(`Не удалось переключить распознавание: ${(err as Error).message}`);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -23,12 +35,13 @@ export function JitsiPage() {
               <span className="absolute inline-flex size-2.5 animate-ping rounded-full bg-err opacity-60" />
               <span className="relative inline-flex size-2.5 rounded-full bg-err" />
             </span>
-            Субтитры идут: {meetings.length}
+            {transcribing > 0 ? `Субтитры идут: ${transcribing}` : `Идут встречи: ${meetings.length}`}
           </span>
         )}
       </div>
 
       {error && <ErrorBanner message={error} />}
+      {actionError && <ErrorBanner message={actionError} />}
 
       {meetings.length === 0 ? (
         <Card>
@@ -38,7 +51,14 @@ export function JitsiPage() {
           />
         </Card>
       ) : (
-        meetings.map((meeting) => <MeetingCard key={meeting.meeting_id} meeting={meeting} now={now} />)
+        meetings.map((meeting) => (
+          <MeetingCard
+            key={meeting.meeting_id}
+            meeting={meeting}
+            now={now}
+            onToggle={toggleTranscribe}
+          />
+        ))
       )}
 
       {recent.length > 0 && (
@@ -68,7 +88,15 @@ export function JitsiPage() {
   );
 }
 
-function MeetingCard({ meeting, now }: { meeting: JitsiMeeting; now: number }) {
+function MeetingCard({
+  meeting,
+  now,
+  onToggle,
+}: {
+  meeting: JitsiMeeting;
+  now: number;
+  onToggle: (meetingId: string, enabled: boolean) => void;
+}) {
   const elapsed = Math.max(0, now / 1000 - meeting.started_at);
   return (
     <Card bodyClassName="p-0">
@@ -81,8 +109,24 @@ function MeetingCard({ meeting, now }: { meeting: JitsiMeeting; now: number }) {
         <Link to={`/jobs/${meeting.job_id}`} className="text-xs text-accent hover:underline">
           открыть транскрипт ↗
         </Link>
-        {meeting.pooled && <Chip>общий пул декодера</Chip>}
-        <span className="ml-auto flex flex-wrap items-center gap-x-3 text-xs text-muted">
+        {meeting.transcribe ? (
+          meeting.pooled && <Chip>общий пул декодера</Chip>
+        ) : (
+          <Chip>без распознавания — расшифровка после встречи</Chip>
+        )}
+        <label
+          className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-muted"
+          title="Распознавать речь во время встречи; выкл — только запись, расшифровка после встречи в очереди"
+        >
+          <input
+            type="checkbox"
+            checked={meeting.transcribe}
+            onChange={(event) => onToggle(meeting.meeting_id, event.target.checked)}
+            className="size-4 accent-cyan-400"
+          />
+          распознавание
+        </label>
+        <span className="flex flex-wrap items-center gap-x-3 text-xs text-muted">
           <span>идёт {fmtClock(elapsed)}</span>
           <span>
             {meeting.segments}{" "}

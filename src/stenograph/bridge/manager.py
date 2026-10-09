@@ -59,6 +59,7 @@ class BridgeManager:
                 pool=self._pool,
                 reprocess=self._reprocess,
                 auto_reprocess=self._auto_reprocess,
+                transcribe=self._settings.realtime_transcribe,
             )
             self._sessions[meeting_id] = session
         if previous is not None:
@@ -77,6 +78,20 @@ class BridgeManager:
         """True while at least one bridge meeting is streaming (worker gate)."""
         with self._lock:
             return bool(self._sessions)
+
+    def has_decoding(self) -> bool:
+        """True while at least one meeting actually decodes (worker gate)."""
+        with self._lock:
+            return any(session.transcribe for session in self._sessions.values())
+
+    def set_transcribe(self, meeting_id: str, enabled: bool) -> bool:
+        """Flip realtime decoding of a running meeting; False when unknown."""
+        with self._lock:
+            session = self._sessions.get(meeting_id)
+        if session is None:
+            return False
+        session.set_transcribe(enabled)
+        return True
 
     def status(self) -> dict:
         """Rich snapshot of active meetings for the Jitsi page."""

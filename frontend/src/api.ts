@@ -86,6 +86,19 @@ export const api = {
   liveStatus: (): Promise<LiveStatus> => request<LiveStatus>("/api/live/status"),
 
   jitsiStatus: (): Promise<JitsiStatus> => request<JitsiStatus>("/api/jitsi/status"),
+
+  jitsiTranscribe: (
+    meetingId: string,
+    enabled: boolean,
+  ): Promise<{ meeting_id: string; transcribe: boolean }> => {
+    const form = new FormData();
+    form.append("meeting_id", meetingId);
+    form.append("enabled", String(enabled));
+    return request<{ meeting_id: string; transcribe: boolean }>("/api/jitsi/transcribe", {
+      method: "POST",
+      body: form,
+    });
+  },
   liveDevices: (): Promise<LiveDevices> => request<LiveDevices>("/api/live/devices"),
   liveStart: (tracks: string[], language?: string): Promise<Job> => {
     const form = new FormData();

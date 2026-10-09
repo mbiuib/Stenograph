@@ -72,6 +72,7 @@ export async function startLiveSession(options: {
   tracks: LiveTrack[];
   language?: string | null;
   title?: string | null;
+  transcribe?: boolean | null;
 }): Promise<ActiveLiveSession> {
   if (capture) throw new Error("запись уже идёт");
 
@@ -79,6 +80,7 @@ export async function startLiveSession(options: {
     tracks: options.tracks,
     language: options.language,
     title: options.title,
+    transcribe: options.transcribe,
     onLevel: (track, rms) => {
       const active = snapshot.active;
       if (!active) return;
