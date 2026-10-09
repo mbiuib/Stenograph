@@ -114,6 +114,7 @@ export interface LiveSessionInfo {
   tracks: string[];
   started_at: number;
   lag_sec: number;
+  text_delay_sec: number | null;
   transcribing: boolean;
   queue_position: number | null;
 }

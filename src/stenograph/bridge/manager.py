@@ -57,6 +57,11 @@ class BridgeManager:
                 self._sessions.pop(meeting_id, None)
         session.stop()
 
+    def has_active(self) -> bool:
+        """True while at least one bridge meeting is streaming (worker gate)."""
+        with self._lock:
+            return bool(self._sessions)
+
     def active(self) -> list[dict]:
         """Snapshot of active sessions (for the status endpoint)."""
         with self._lock:

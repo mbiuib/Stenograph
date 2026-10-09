@@ -32,6 +32,7 @@ from .base import (
     AsrResult,
     CancelCallback,
     NoSpeechError,
+    PauseGate,
     ProgressCallback,
     SegmentCallback,
     TranscribeOptions,
@@ -275,6 +276,7 @@ class MossEngine:
         on_progress: ProgressCallback | None = None,
         on_segment: SegmentCallback | None = None,
         is_cancelled: CancelCallback | None = None,
+        pause_gate: PauseGate | None = None,
     ) -> AsrResult:
         """Transcribe and diarize the file; segments stream as chunks finish."""
         torch, model, processor = self._load()
@@ -298,6 +300,8 @@ class MossEngine:
             for index, chunk_path in enumerate(chunk_paths):
                 if is_cancelled and is_cancelled():
                     raise JobCancelled()
+                if pause_gate is not None:
+                    pause_gate()
                 offset = plan[index][0]
                 self._report(on_progress, index, total, f"Чанк {index + 1}/{total}: генерация…")
 

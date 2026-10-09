@@ -70,6 +70,8 @@ def create_app(
         auto_reprocess=settings.live_auto_reprocess,
     )
     bridge = bridge or BridgeManager(settings, service.repo, service.bus)
+    # Background ASR yields to the air: heavy jobs wait while these are live.
+    service.realtime_provider = lambda: live.has_active() or bridge.has_active()
 
     app = FastAPI(title="Стенограф", version=__version__)
     app.state.settings = settings

@@ -131,6 +131,11 @@ class LiveManager:
 
     # -- public API -----------------------------------------------------------
 
+    def has_active(self) -> bool:
+        """True while at least one live session runs (used by the worker gate)."""
+        with self._lock:
+            return bool(self._sessions)
+
     def status(self) -> dict:
         """Live sessions and the state of the transcription queue, for the UI."""
         with self._lock:
@@ -148,6 +153,7 @@ class LiveManager:
                     "tracks": list(session.tracks),
                     "started_at": session.job.started_at,
                     "lag_sec": session.lag_seconds(),
+                    "text_delay_sec": session.text_delay_seconds(),
                     "transcribing": session.job.id == serving,
                     "queue_position": position,
                 }
@@ -511,6 +517,22 @@ class _LiveSession:
         if not self._trackers:
             return 0.0
         return round(max(tracker.lag_seconds for tracker in self._trackers.values()), 1)
+
+    def text_delay_seconds(self) -> float | None:
+        """How far the published transcript trails the wall clock (seconds).
+
+        The watermark is the end of the newest committed segment; the delay is
+        the session wall time minus that watermark. ``None`` until the first
+        segment lands.
+        """
+        started = self.job.started_at
+        if not started:
+            return None
+        with self._lock:
+            if not self._segments:
+                return None
+            watermark = max(segment.end for segment in self._segments)
+        return round(max(0.0, (time.time() - started) - watermark), 1)
 
     def serve(self, *, max_ticks: int, max_sec: float) -> bool:
         """One bounded turn of transcription on the decode worker.

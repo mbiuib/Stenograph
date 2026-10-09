@@ -16,6 +16,7 @@ class FakeEngine:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.last_pause_gate: Callable[[], None] | None = None
 
     def transcribe(
         self,
@@ -25,12 +26,14 @@ class FakeEngine:
         on_progress: Callable[[TranscribeProgress], None] | None = None,
         on_segment: Callable[[Segment], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        pause_gate: Callable[[], None] | None = None,
     ) -> AsrResult:
         """Return canned segments; honour cancellation like a real engine."""
         from stenograph.domain.errors import JobCancelled
 
         if is_cancelled and is_cancelled():
             raise JobCancelled()
+        self.last_pause_gate = pause_gate
         self.calls.append(str(audio_path))
         segments = [
             Segment(index=0, start=0.0, end=1.0, text="раз"),

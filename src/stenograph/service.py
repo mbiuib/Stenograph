@@ -48,6 +48,9 @@ class TranscriptionService:
         self.engine_name = engine_name or settings.engine
         self._engine_factory = engine_factory
         self._llm = llm_client
+        # Set by create_app: does a live/bridge stream run right now? Heavy ASR
+        # jobs then hold back until the air is free (realtime prioritisation).
+        self.realtime_provider: Callable[[], bool] | None = None
         self._engines: dict[str, AsrEngine] = {}  # created lazily on the worker thread
         self._queue: queue.Queue[str] = queue.Queue()
         self._waiting: list[str] = []
@@ -253,10 +256,55 @@ class TranscriptionService:
 
     # -- worker -------------------------------------------------------------
 
+    def _realtime_busy(self) -> bool:
+        """True while any live/bridge stream is running (the background yields)."""
+        provider = self.realtime_provider
+        if provider is None:
+            return False
+        try:
+            return bool(provider())
+        except Exception:  # noqa: BLE001 — the gate must never kill the worker
+            log.debug("realtime provider failed", exc_info=True)
+            return False
+
+    def _wait_for_realtime_gap(self, job_id: str) -> None:
+        """Hold a heavy ASR job while the air is busy; run in the next gap."""
+        job = self.repo.get(job_id)
+        if job is None or job.kind not in ("file", "reprocess"):
+            return
+        if not self._realtime_busy():
+            return
+        log.info("job %s (%s) waits: a live/bridge stream is active", job_id, job.kind)
+        job.message = "Ждёт: идёт живая запись"
+        self.repo.save(job)
+        self.bus.publish(
+            job.id,
+            {
+                "type": "status",
+                "status": str(job.status),
+                "message": job.message,
+                "progress": job.progress,
+            },
+        )
+        while self._realtime_busy():
+            time.sleep(1.0)
+
+    def _pause_gate(self, is_cancelled: Callable[[], bool]) -> Callable[[], None] | None:
+        """Cooperative yield handed to engine chunk loops (None = no gate)."""
+        if self.realtime_provider is None:
+            return None
+
+        def gate() -> None:
+            while self._realtime_busy() and not is_cancelled():
+                time.sleep(0.5)
+
+        return gate
+
     def _work_loop(self) -> None:
         while True:
             job_id = self._queue.get()
             try:
+                self._wait_for_realtime_gap(job_id)
                 self._run_job(job_id)
             except Exception:  # the worker must survive anything a job throws
                 log.exception("worker crashed on job %s", job_id)
@@ -302,6 +350,7 @@ class TranscriptionService:
                 engine=engine,
                 options=options,
                 is_cancelled=cancel_event.is_set,
+                pause_gate=self._pause_gate(cancel_event.is_set),
             )
         finally:
             with self._lock:

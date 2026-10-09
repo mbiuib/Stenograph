@@ -21,6 +21,7 @@ from ..metrics import note_model_loaded, touch_engine
 from .base import (
     AsrResult,
     CancelCallback,
+    PauseGate,
     ProgressCallback,
     SegmentCallback,
     TranscribeOptions,
@@ -84,8 +85,12 @@ class FasterWhisperEngine:
         on_progress: ProgressCallback | None = None,
         on_segment: SegmentCallback | None = None,
         is_cancelled: CancelCallback | None = None,
+        pause_gate: PauseGate | None = None,
     ) -> AsrResult:
         """Transcribe the file; reports every segment as soon as it is decoded."""
+        if pause_gate is not None:
+            # The batched pass cannot yield mid-run: hold right before it.
+            pause_gate()
         model = self._load()
         touch_engine(self)
         from faster_whisper import BatchedInferencePipeline

@@ -36,6 +36,7 @@ class DiarizedFakeEngine:
         on_progress=None,
         on_segment=None,
         is_cancelled=None,
+        pause_gate=None,
     ) -> AsrResult:
         """Return two canned diarized segments per track."""
         if self._gate is not None:
@@ -236,6 +237,7 @@ class TrackSelectiveFakeEngine:
         on_progress=None,
         on_segment=None,
         is_cancelled=None,
+        pause_gate=None,
     ) -> AsrResult:
         """Raise NoSpeechError for system.wav, return one segment otherwise."""
         name = Path(audio_path).name
@@ -261,6 +263,7 @@ class TotallySilentFakeEngine:
         on_progress=None,
         on_segment=None,
         is_cancelled=None,
+        pause_gate=None,
     ) -> AsrResult:
         """Always report the absence of speech."""
         raise NoSpeechError("речи нет (тест)")

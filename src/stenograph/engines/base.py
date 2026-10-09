@@ -55,6 +55,7 @@ class NoSpeechError(RuntimeError):
 ProgressCallback = Callable[[TranscribeProgress], None]
 SegmentCallback = Callable[[Segment], None]
 CancelCallback = Callable[[], bool]
+PauseGate = Callable[[], None]
 
 
 class AsrEngine(Protocol):
@@ -74,6 +75,11 @@ class AsrEngine(Protocol):
         on_progress: ProgressCallback | None = None,
         on_segment: SegmentCallback | None = None,
         is_cancelled: CancelCallback | None = None,
+        pause_gate: PauseGate | None = None,
     ) -> AsrResult:
-        """Transcribe a local audio file, raising JobCancelled on cancellation."""
+        """Transcribe a local audio file, raising JobCancelled on cancellation.
+
+        ``pause_gate`` is called between internal chunks (when an engine can
+        yield): it may block while realtime streams are active.
+        """
         ...

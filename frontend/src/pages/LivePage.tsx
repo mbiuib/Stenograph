@@ -418,6 +418,10 @@ function ActiveSession({
     : null;
   const lagHint =
     session && session.lag_sec >= 2 ? `задержка ≈ ${Math.round(session.lag_sec)} с` : null;
+  const delayHint =
+    session && session.text_delay_sec != null && session.text_delay_sec >= 3
+      ? `текст отстаёт ≈ ${Math.round(session.text_delay_sec)} с`
+      : null;
   const partials = LIVE_SPEAKERS.map((speaker) => [speaker, stream.partials[speaker]] as const).filter(
     (entry) => entry[1],
   );
@@ -450,6 +454,7 @@ function ActiveSession({
                 <span>
                   {transcriptionState}
                   {lagHint ? ` · ${lagHint}` : ""}
+                  {delayHint ? ` · ${delayHint}` : ""}
                 </span>
               )}
             </div>

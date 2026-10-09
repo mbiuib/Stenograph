@@ -69,6 +69,7 @@ def run_file_job(
     engine: AsrEngine,
     options: TranscribeOptions,
     is_cancelled: Callable[[], bool],
+    pause_gate: Callable[[], None] | None = None,
 ) -> None:
     """Run the whole file pipeline for one job, updating the repository and bus."""
 
@@ -130,6 +131,7 @@ def run_file_job(
                 on_progress=on_progress,
                 on_segment=on_segment,
                 is_cancelled=is_cancelled,
+                pause_gate=pause_gate,
             )
         except NoSpeechError:
             # Пустой результат на тишине — честный исход, а не сбой.
@@ -195,6 +197,7 @@ def run_reprocess_job(
     engine: AsrEngine,
     options: TranscribeOptions,
     is_cancelled: Callable[[], bool],
+    pause_gate: Callable[[], None] | None = None,
 ) -> None:
     """Re-transcribe a live recording track by track and merge into one transcript.
 
@@ -268,6 +271,7 @@ def run_reprocess_job(
                     on_progress=on_progress,
                     on_segment=on_segment,
                     is_cancelled=is_cancelled,
+                    pause_gate=pause_gate,
                 )
             except NoSpeechError:
                 # Безречевая дорожка (тишина, музыка без речи) — не сбой.

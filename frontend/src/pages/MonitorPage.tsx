@@ -145,11 +145,12 @@ export function MonitorPage() {
                     >
                       {session.source_name}
                     </Link>
-                    <span
-                      className={`tabular shrink-0 text-xs ${
-                        session.lag_sec > 15 ? "text-err" : "text-muted"
-                      }`}
-                    >
+                    <span className="tabular shrink-0 text-xs text-muted">
+                      {session.text_delay_sec != null && (
+                        <span className={session.text_delay_sec > 20 ? "text-err" : ""}>
+                          отстаёт на {Math.round(session.text_delay_sec)} с ·{" "}
+                        </span>
+                      )}
                       лаг {session.lag_sec.toFixed(1)} с
                     </span>
                   </div>

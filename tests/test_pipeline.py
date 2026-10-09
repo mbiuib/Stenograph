@@ -72,6 +72,7 @@ class _ProgressEngine:
         on_progress=None,
         on_segment=None,
         is_cancelled=None,
+        pause_gate=None,
     ) -> AsrResult:
         for fraction in (0.25, 0.75):
             if on_progress:
@@ -164,7 +165,14 @@ def test_pipeline_cancellation(tmp_path: Path) -> None:
 
     class CancellingEngine(FakeEngine):
         def transcribe(
-            self, audio_path, options, *, on_progress=None, on_segment=None, is_cancelled=None
+            self,
+            audio_path,
+            options,
+            *,
+            on_progress=None,
+            on_segment=None,
+            is_cancelled=None,
+            pause_gate=None,
         ):
             raise JobCancelled()
 

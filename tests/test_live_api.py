@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import time
 from pathlib import Path
 from time import monotonic
 
@@ -73,6 +74,15 @@ def test_live_session_end_to_end(tmp_path: Path) -> None:
     assert "partial" in types, types
     assert "level" in types, types
     assert "segment" in types, types
+
+    # the status carries the honest text-delay metric (newest segment watermark)
+    status = client.get("/api/live/status").json()
+    item = next(session for session in status["sessions"] if session["job_id"] == job_id)
+    assert "text_delay_sec" in item
+    session = live._sessions[job_id]
+    session.job.started_at = time.time() - 500.0
+    delay = session.text_delay_seconds()
+    assert delay is not None and 490.0 <= delay <= 505.0, delay
 
     # a second session cannot start while one is running
     assert client.post("/api/live/start").status_code == 409
