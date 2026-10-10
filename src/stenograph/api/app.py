@@ -346,6 +346,7 @@ def create_app(
             "engine": service.engine_name,
             "reprocess_engine": settings.reprocess_engine,
             "bridge_language": settings.bridge_language,
+            "jitsi_idle_stop_sec": settings.jitsi_idle_stop_sec,
             "realtime_transcribe": settings.realtime_transcribe,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,
@@ -574,6 +575,27 @@ def create_app(
             raise HTTPException(status_code=404, detail="встреча не найдена")
         return {"meeting_id": meeting_id, "transcribe": enabled}
 
+    @app.post("/api/jitsi/stop")
+    def jitsi_stop(
+        meeting_id: str | None = Form(default=None),
+        job_id: str | None = Form(default=None),
+    ) -> dict:
+        """Stop a running meeting from the web UI: recording and captions.
+
+        Finalizes the meeting like a normal end (segments, per-speaker WAVs,
+        auto-chained improvement) and closes Jigasi's websocket — Jigasi then
+        leaves the room and the captions stop. Pass ``meeting_id`` (Jitsi page)
+        or ``job_id`` (job page).
+        """
+        if not meeting_id and not job_id:
+            raise HTTPException(status_code=400, detail="укажите meeting_id или job_id")
+        session = bridge.stop(meeting_id=meeting_id, job_id=job_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="встреча не найдена")
+        session.wait_finished(timeout=30.0)
+        job = service.get(session.job.id)
+        return job.model_dump() if job is not None else {"id": session.job.id, "status": "done"}
+
     @app.websocket("/ws/{meeting_id}")
     async def whisper_stream(websocket: WebSocket, meeting_id: str) -> None:
         """Transcription endpoint consumed by Jigasi's WhisperTranscriptionService.
@@ -588,6 +610,7 @@ def create_app(
         try:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(_caption_sender, websocket, session)
+                tg.start_soon(_watch_bridge_session, websocket, session)
                 try:
                     async for data in websocket.iter_bytes():
                         if is_eof(data):
@@ -645,6 +668,21 @@ async def _watch_live_session(websocket: WebSocket, live: LiveManager, job_id: s
         await anyio.sleep(0.5)
     with contextlib.suppress(Exception):  # noqa: BLE001 — the client may be gone
         await websocket.close()
+
+
+async def _watch_bridge_session(websocket: WebSocket, session: MeetingSession) -> None:
+    """Close the Jigasi socket once the meeting is asked to stop early.
+
+    A manual stop or the idle watchdog finalizes the recording on the server
+    side; Jigasi must stop too, or it stays in the room and keeps captioning.
+    Also exits when the session finished normally (Jigasi hung up first) — a
+    watcher that never returns would deadlock the task group.
+    """
+    while not (session.stop_requested or session.finished):
+        await anyio.sleep(0.5)
+    if session.stop_requested:
+        with contextlib.suppress(Exception):  # noqa: BLE001 — the client may be gone
+            await websocket.close()
 
 
 async def _forward_live_events(

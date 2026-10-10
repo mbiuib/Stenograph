@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # Jitsi captions: shorter windows than live — the caption lag equals the cap.
     bridge_batch_window_sec: float = 3.0
     bridge_batch_hold_sec: float = 0.4
+    # MEETSCRIBE_JITSI_IDLE_STOP_SEC: finalize a Jitsi meeting automatically
+    # after this many seconds without any speech (0 = disabled). Covers the
+    # "everybody left, but a forgotten client keeps the room alive" case:
+    # Jigasi only disconnects when the last real participant leaves.
+    jitsi_idle_stop_sec: float = 600.0
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

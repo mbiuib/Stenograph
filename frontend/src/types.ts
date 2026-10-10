@@ -151,6 +151,9 @@ export interface JitsiMeeting {
   transcribe: boolean;
   segments: number;
   participants: JitsiParticipant[];
+  silence_sec: number;
+  idle_stop_sec: number;
+  stopping: boolean;
 }
 
 export interface JitsiStatus {

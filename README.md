@@ -252,7 +252,7 @@ certutil -user -addstore -f Root <путь>\ca.crt
 |---|---|
 | Задачи | `GET/POST /api/jobs`, `GET/DELETE/PATCH /api/jobs/{id}`, `POST /api/jobs/{id}/cancel · retry · reprocess · analyze`, `GET /api/jobs/{id}/audio[/{track}]` |
 | Live | `POST /api/live/start · stop`, `GET /api/live/status · devices`, `WS /ws/live` |
-| Jitsi | `GET /api/jitsi/status`, `POST /api/jitsi/transcribe`, `WS /ws/{meeting}` |
+| Jitsi | `GET /api/jitsi/status`, `POST /api/jitsi/transcribe · stop`, `WS /ws/{meeting}` |
 | Служебные | `GET /api/health · config · engines · queue · stats · metrics` |
 
 ## Настройки
@@ -272,6 +272,7 @@ certutil -user -addstore -f Root <путь>\ca.crt
 | `MEETSCRIBE_LANGUAGE` | `auto` | язык распознавания |
 | `MEETSCRIBE_LIVE_MODEL` | `large-v3-turbo` | модель живого декодирования (Live/Jitsi) |
 | `MEETSCRIBE_REALTIME_TRANSCRIBE` | `false` | декодирование Live/Jitsi по ходу записи (иначе record-only) |
+| `MEETSCRIBE_JITSI_IDLE_STOP_SEC` | `600` | авто-стоп Jitsi-встречи после N секунд без речи (`0` — выключено) |
 | `MEETSCRIBE_LIVE_AUTO_REPROCESS` | `true` | автоулучшение записей Live через `moss` после остановки |
 | `MEETSCRIBE_LIVE_TURN_TICKS` / `MEETSCRIBE_LIVE_TURN_SEC` | `6` / `2.0` | лимит работы одной сессии за ход очереди |
 | `MEETSCRIBE_LLM_BASE_URL` | `http://127.0.0.1:1234/v1` | OpenAI-совместимый сервер для анализа |

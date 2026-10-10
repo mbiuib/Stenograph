@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from fakes import FakeEngine, PositionTranscriber, encoded_chunk, speech_audio
 from stenograph.api.app import create_app
@@ -155,6 +156,9 @@ def test_jitsi_status_reports_live_meetings(tmp_path: Path) -> None:
         assert first["label"] == "Спикер 1"
         assert first["audio_sec"] > 0
         assert first["last_frame_sec"] is not None
+        assert meeting["stopping"] is False
+        assert meeting["idle_stop_sec"] == 600.0
+        assert meeting["silence_sec"] >= 0
 
     assert _wait_until(
         lambda: client.get("/api/jitsi/status").json()["active"] is False
@@ -513,3 +517,184 @@ def test_bridge_catches_the_tracker_up_when_decoding_turns_on(tmp_path: Path) ->
     assert 0.7 < seconds[0] < 1.4, f"первым в трекер идёт догон тишиной: {seconds}"
     assert not chunks[0].any() and chunks[-1].any()
     session.stop()
+
+
+def test_jitsi_stop_api_finalizes_the_meeting(tmp_path: Path) -> None:
+    """Остановка встречи из UI: запись финализируется, сокет Jigasi закрывается.
+
+    Сессия завершается как обычное окончание встречи (задача done, дорожки,
+    авто-улучшение), причина пишется в meta, а websocket закрывается — иначе
+    Jigasi остался бы в комнате и продолжал слать субтитры в пустоту.
+    """
+    handed: list[str] = []
+
+    def reprocess(job: Any) -> None:
+        handed.append(job.id)
+        return None
+
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    bus = EventBus()
+    service = TranscriptionService(settings, repo, bus, engine_factory=lambda n, s: FakeEngine())
+    bridge = BridgeManager(
+        settings,
+        repo,
+        bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+        reprocess=reprocess,
+        auto_reprocess=True,
+    )
+    client = TestClient(create_app(settings=settings, service=service, bridge=bridge))
+
+    with client.websocket_connect("/ws/room-stop-now") as websocket:
+        for index in range(8):
+            websocket.send_bytes(frame("p1", "ru-RU", encoded_chunk(index)))
+        assert _wait_until(
+            lambda: bool(client.get("/api/jitsi/status").json()["meetings"]), timeout=5.0
+        )
+
+        stopped = client.post("/api/jitsi/stop", data={"meeting_id": "room-stop-now"})
+        assert stopped.status_code == 200, stopped.text
+        payload = stopped.json()
+        assert payload["status"] == "done", payload
+        assert payload["meta"]["stop_reason"] == "manual", payload["meta"]
+        assert "вручную" in payload["message"], payload["message"]
+
+        # сервер закрывает сокет: читаем до кадра закрытия
+        with pytest.raises(WebSocketDisconnect):
+            for _ in range(50):
+                websocket.receive_json()
+
+    assert _wait_until(lambda: bool(handed), timeout=10.0), handed
+    assert _wait_until(
+        lambda: client.get("/api/jitsi/status").json()["active"] is False, timeout=5.0
+    )
+
+
+def test_jitsi_stop_api_accepts_the_job_id(tmp_path: Path) -> None:
+    """Кнопка на странице задачи шлёт job_id — остановка находится и так."""
+    client, _repo = _make_stack(tmp_path)
+    with client.websocket_connect("/ws/room-stop-job") as websocket:
+        websocket.send_bytes(frame("p1", "ru", encoded_chunk(0)))
+        assert _wait_until(
+            lambda: bool(client.get("/api/jitsi/status").json()["meetings"]), timeout=5.0
+        )
+        job_id = client.get("/api/jitsi/status").json()["meetings"][0]["job_id"]
+
+        stopped = client.post("/api/jitsi/stop", data={"job_id": job_id})
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["id"] == job_id
+        assert stopped.json()["status"] == "done"
+
+        with pytest.raises(WebSocketDisconnect):
+            for _ in range(50):
+                websocket.receive_json()
+
+
+def test_jitsi_stop_api_validation(tmp_path: Path) -> None:
+    """Без идентификатора — 400; несуществующая встреча — 404."""
+    client, _repo = _make_stack(tmp_path)
+    assert client.post("/api/jitsi/stop").status_code == 400
+    assert client.post("/api/jitsi/stop", data={"meeting_id": "нет-такой"}).status_code == 404
+
+
+def test_jitsi_idle_watchdog_stops_a_silent_meeting(tmp_path: Path) -> None:
+    """Тишина дольше порога — встреча завершается сама.
+
+    Зомби-клиент (забытая вкладка с выключенным микрофоном) держит комнату
+    живой, но речи в ней нет: watchdog сам закрывает запись, и в задаче это
+    видно по stop_reason=idle. Кадры речи сбрасывают таймер.
+
+    Фальсификация: без вызова watchdog'а из pump-цикла сессия остаётся
+    running до EOF, и ожидание ниже падает по таймауту.
+    """
+    settings = Settings(
+        data_dir=tmp_path,
+        live_step_sec=0.4,
+        live_max_window_sec=10.0,
+        jitsi_idle_stop_sec=1.5,
+    )
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    service = TranscriptionService(
+        settings, repo, EventBus(), engine_factory=lambda n, s: FakeEngine()
+    )
+    bridge = BridgeManager(
+        settings,
+        repo,
+        service.bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+    )
+    client = TestClient(create_app(settings=settings, service=service, bridge=bridge))
+
+    with client.websocket_connect("/ws/room-idle") as websocket:
+        websocket.send_bytes(frame("p1", "ru", encoded_chunk(0)))
+        assert _wait_until(
+            lambda: bool(client.get("/api/jitsi/status").json()["meetings"]), timeout=5.0
+        )
+        meeting = client.get("/api/jitsi/status").json()["meetings"][0]
+        assert meeting["idle_stop_sec"] == 1.5
+        assert meeting["stopping"] is False
+        job_id = meeting["job_id"]
+
+        # речи больше нет — watchdog должен запросить остановку сам
+        def stopping() -> bool:
+            meetings_now = client.get("/api/jitsi/status").json()["meetings"]
+            return bool(meetings_now) and meetings_now[0]["stopping"] is True
+
+        assert _wait_until(stopping, timeout=8.0), "watchdog не остановил молчащую встречу"
+
+        # сервер закрывает сокет; читаем до кадра закрытия
+        with pytest.raises(WebSocketDisconnect):
+            for _ in range(50):
+                websocket.receive_json()
+
+    assert _wait_until(
+        lambda: client.get("/api/jitsi/status").json()["active"] is False, timeout=5.0
+    ), "сессия должна покинуть реестр после закрытия сокета"
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "done", job
+    assert job["meta"]["stop_reason"] == "idle", job["meta"]
+    assert "без речи" in job["message"], job["message"]
+
+
+def test_jitsi_idle_watchdog_can_be_disabled(tmp_path: Path) -> None:
+    """Порог 0 выключает авто-стоп: молчащая встреча пишется до конца."""
+    settings = Settings(
+        data_dir=tmp_path,
+        live_step_sec=0.4,
+        live_max_window_sec=10.0,
+        jitsi_idle_stop_sec=0.0,
+    )
+    settings.ensure_dirs()
+    repo = JobRepository(settings.db_path)
+    service = TranscriptionService(
+        settings, repo, EventBus(), engine_factory=lambda n, s: FakeEngine()
+    )
+    bridge = BridgeManager(
+        settings,
+        repo,
+        service.bus,
+        transcriber_factory=lambda language: PositionTranscriber(),
+    )
+    client = TestClient(create_app(settings=settings, service=service, bridge=bridge))
+
+    with client.websocket_connect("/ws/room-idle-off") as websocket:
+        websocket.send_bytes(frame("p1", "ru", encoded_chunk(0)))
+        assert _wait_until(
+            lambda: bool(client.get("/api/jitsi/status").json()["meetings"]), timeout=5.0
+        )
+        time.sleep(2.0)  # заведомо больше «тихого» порога соседнего теста
+        status = client.get("/api/jitsi/status").json()
+        assert status["active"] is True, "выключенный watchdog не должен останавливать встречу"
+        assert status["meetings"][0]["stopping"] is False
+        websocket.send_bytes(b"\x00")
+
+    assert _wait_until(
+        lambda: bool([job for job in repo.list_jobs() if job.kind == "jitsi"])
+        and all(job.status == "done" for job in repo.list_jobs() if job.kind == "jitsi"),
+        timeout=10.0,
+    )
+    jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
+    assert "stop_reason" not in jobs[0].meta, jobs[0].meta  # обычный конец — без причины

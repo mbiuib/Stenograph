@@ -176,7 +176,11 @@ export function JobDetailPage() {
     setStopping(true);
     setReprocessError(null);
     try {
-      await api.liveStop(job.id);
+      if (job.kind === "jitsi") {
+        await api.jitsiStop({ jobId: job.id });
+      } else {
+        await api.liveStop(job.id);
+      }
     } catch (err) {
       setReprocessError(`Не удалось остановить запись: ${(err as Error).message}`);
     } finally {
@@ -400,9 +404,14 @@ export function JobDetailPage() {
             </button>
           )}
           {live && job.kind === "jitsi" && (
-            <span className="flex items-center rounded-lg border border-edge px-3 py-2 text-xs text-muted">
-              запись идёт через Jitsi — остановится с встречей
-            </span>
+            <button
+              onClick={() => void stopLive()}
+              disabled={stopping}
+              className="flex items-center gap-2 rounded-lg border border-warn/40 px-3 py-2 text-sm text-warn hover:bg-warn/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <IconX className="size-4" />
+              {stopping ? "Останавливаем…" : "Остановить запись"}
+            </button>
           )}
           {!live && (
             <button

@@ -9,6 +9,7 @@ import type { JitsiMeeting } from "../types";
 
 export function JitsiPage() {
   const [actionError, setActionError] = useState<string | null>(null);
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
   const { data: status, error } = usePolling(() => api.jitsiStatus(), 2000);
   const { data: jobs } = usePolling(() => api.listJobs(undefined, 100), 5000);
   const now = useNow(1000);
@@ -22,6 +23,18 @@ export function JitsiPage() {
       await api.jitsiTranscribe(meetingId, enabled);
     } catch (err) {
       setActionError(`Не удалось переключить распознавание: ${(err as Error).message}`);
+    }
+  };
+
+  const stopMeeting = async (meetingId: string) => {
+    setActionError(null);
+    setStoppingId(meetingId);
+    try {
+      await api.jitsiStop({ meetingId });
+    } catch (err) {
+      setActionError(`Не удалось остановить запись: ${(err as Error).message}`);
+    } finally {
+      setStoppingId(null);
     }
   };
 
@@ -57,6 +70,8 @@ export function JitsiPage() {
             meeting={meeting}
             now={now}
             onToggle={toggleTranscribe}
+            onStop={stopMeeting}
+            stoppingId={stoppingId}
           />
         ))
       )}
@@ -92,12 +107,21 @@ function MeetingCard({
   meeting,
   now,
   onToggle,
+  onStop,
+  stoppingId,
 }: {
   meeting: JitsiMeeting;
   now: number;
   onToggle: (meetingId: string, enabled: boolean) => void;
+  onStop: (meetingId: string) => void;
+  stoppingId: string | null;
 }) {
   const elapsed = Math.max(0, now / 1000 - meeting.started_at);
+  const silence = meeting.silence_sec ?? 0;
+  const idleLimit = meeting.idle_stop_sec ?? 0;
+  const remaining = idleLimit > 0 ? Math.max(0, Math.ceil(idleLimit - silence)) : null;
+  const silenceShown = silence >= (idleLimit > 0 ? Math.min(60, idleLimit / 2) : 60);
+  const stopBusy = stoppingId === meeting.meeting_id || meeting.stopping;
   return (
     <Card bodyClassName="p-0">
       <div className="flex flex-wrap items-center gap-2 border-b border-edge px-4 py-3">
@@ -136,7 +160,24 @@ function MeetingCard({
             {meeting.participants.length}{" "}
             {plural(meeting.participants.length, "говорящий", "говорящих", "говорящих")}
           </span>
+          {silenceShown && (
+            <span
+              className={remaining != null && remaining <= 120 ? "text-warn" : undefined}
+              title="Никто не говорит; при достижении порога встреча завершится сама"
+            >
+              тишина {fmtClock(silence)}
+              {remaining != null && remaining > 0 && ` · авто-стоп через ${fmtClock(remaining)}`}
+            </span>
+          )}
         </span>
+        <button
+          onClick={() => onStop(meeting.meeting_id)}
+          disabled={stopBusy}
+          title="Завершить запись и субтитры этой встречи"
+          className="rounded-lg border border-warn/40 px-2.5 py-1.5 text-xs text-warn transition-colors hover:bg-warn/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {stopBusy ? "Останавливается…" : "Остановить запись"}
+        </button>
       </div>
       <ul className="divide-y divide-edge/60">
         {meeting.participants.map((participant) => {

@@ -189,6 +189,9 @@ class MeetingSession:
         self._closed = threading.Event()
         self._stop_event = threading.Event()
         self._started_monotonic = time.monotonic()
+        self._idle_stop_sec = settings.jitsi_idle_stop_sec  # 0 = watchdog off
+        self._last_frame_monotonic = self._started_monotonic
+        self._stop_reason: str | None = None  # "manual" | "idle" | None
         self._audio_dir = settings.data_dir / "jitsi" / self.job.id
         self._audio_dir.mkdir(parents=True, exist_ok=True)
         self._worker = threading.Thread(
@@ -231,7 +234,48 @@ class MeetingSession:
                 "transcribe": self.transcribe,
                 "segments": len(self._segments),
                 "participants": participants,
+                "silence_sec": round(now - self._last_frame_monotonic, 1),
+                "idle_stop_sec": self._idle_stop_sec,
+                "stopping": self._stop_event.is_set(),
             }
+
+    # -- early stops (API thread / pump thread) --------------------------------
+
+    @property
+    def stop_requested(self) -> bool:
+        """True once a stop (manual or idle watchdog) has been requested."""
+        return self._stop_event.is_set()
+
+    @property
+    def finished(self) -> bool:
+        """True once the worker has finalized the session (all drained)."""
+        return self._closed.is_set()
+
+    @property
+    def stop_reason(self) -> str | None:
+        """Why the session stopped early ("manual"/"idle"); None on a normal end."""
+        with self._lock:
+            return self._stop_reason
+
+    def request_stop(self, reason: str) -> bool:
+        """Ask the session to finalize early; True when the flag was fresh.
+
+        Used by the manual stop API and the idle watchdog: the worker exits its
+        loop, flushes the trackers and finalizes the job; the websocket watcher
+        then closes the Jigasi socket so the captions stop too. First reason
+        wins (an idle auto-stop and a manual click can race).
+        """
+        with self._lock:
+            self._stop_reason = self._stop_reason or reason
+            fresh = not self._stop_event.is_set()
+        if fresh:
+            self._stop_event.set()
+            log.info("jitsi bridge: остановка встречи %s (%s)", self.meeting_id, reason)
+        return fresh
+
+    def wait_finished(self, timeout: float = 30.0) -> bool:
+        """Block until the worker finalized the session; False on timeout."""
+        return self._closed.wait(timeout)
 
     # -- intake (event loop thread) -------------------------------------------
 
@@ -269,6 +313,7 @@ class MeetingSession:
                 self._pending[participant_id].append(audio)
                 participant.tracker_fed = participant.next_offset
             participant.last_frame = time.monotonic()
+            self._last_frame_monotonic = participant.last_frame
         if created and self.transcribe:
             # Never register with the pool while holding the session lock: the
             # decode pool takes this lock while serving and holds its own serve
@@ -496,6 +541,7 @@ class MeetingSession:
         try:
             while not self._stop_event.is_set():
                 self._pump_participants()
+                self._check_idle()
                 time.sleep(0.15)
             self._detach_streams()
             self._pump_participants()
@@ -545,6 +591,27 @@ class MeetingSession:
             if chunks:
                 participant.tracker.tick()
 
+    def _check_idle(self) -> None:
+        """Auto-stop the meeting when nobody has spoken for the idle timeout.
+
+        Jigasi keeps the session while any client stays in the room: a
+        forgotten tab with a muted microphone holds an "empty" meeting alive
+        forever. Speech frames reset the timer; without a single frame it
+        counts from the session start. ``MEETSCRIBE_JITSI_IDLE_STOP_SEC`` = 0
+        disables the watchdog.
+        """
+        if self._idle_stop_sec <= 0 or self._stop_event.is_set():
+            return
+        idle_sec = time.monotonic() - self._last_frame_monotonic
+        if idle_sec >= self._idle_stop_sec:
+            log.info(
+                "jitsi bridge: встреча %s молчит %.0f с (порог %.0f) — авто-стоп",
+                self.meeting_id,
+                idle_sec,
+                self._idle_stop_sec,
+            )
+            self.request_stop("idle")
+
     def _persist(self) -> None:
         with self._lock:
             ordered = sorted(self._segments, key=lambda item: item.start)
@@ -562,9 +629,10 @@ class MeetingSession:
         self.job.text = "\n".join(f"{item.speaker}: {item.text}" for item in ordered)
         self.job.status = JobStatus.DONE
         self.job.progress = 100
-        self.job.message = (
-            "Транскрибация завершена" if self.transcribe else "Запись завершена (без распознавания)"
-        )
+        self.job.message = self._final_message()
+        reason = self.stop_reason
+        if reason:
+            self.job.meta["stop_reason"] = reason
         self.job.finished_at = time.time()
         self.job.meta["duration"] = round(duration, 2)
         self.job.meta["processing_seconds"] = round(duration, 2)
@@ -578,6 +646,20 @@ class MeetingSession:
             self.meeting_id,
             len(ordered),
             duration,
+        )
+
+    def _final_message(self) -> str:
+        """Human message for the finished job; early stops name their reason."""
+        reason = self.stop_reason
+        if reason == "manual":
+            return "Запись остановлена вручную из Стенографа"
+        if reason == "idle":
+            minutes, seconds = divmod(int(self._idle_stop_sec), 60)
+            return f"Остановлено автоматически: {minutes:02d}:{seconds:02d} без речи"
+        return (
+            "Транскрибация завершена"
+            if self.transcribe
+            else "Запись завершена (без распознавания)"
         )
 
     def _chain_reprocess(self) -> None:

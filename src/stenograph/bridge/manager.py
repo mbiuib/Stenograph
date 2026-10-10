@@ -93,6 +93,32 @@ class BridgeManager:
         session.set_transcribe(enabled)
         return True
 
+    def stop(
+        self,
+        *,
+        meeting_id: str | None = None,
+        job_id: str | None = None,
+        reason: str = "manual",
+    ) -> MeetingSession | None:
+        """Request an early finalize of a running meeting (manual stop).
+
+        Found either by the websocket ``meeting_id`` (Jitsi page) or by the
+        recording's ``job_id`` (job page); None when no such meeting is live.
+        The websocket watcher closes Jigasi's socket and the handler finalizes
+        the job — callers may wait for the finalize via ``wait_finished()``.
+        """
+        with self._lock:
+            if meeting_id is not None:
+                session = self._sessions.get(meeting_id)
+            else:
+                session = next(
+                    (item for item in self._sessions.values() if item.job.id == job_id),
+                    None,
+                )
+        if session is not None:
+            session.request_stop(reason)
+        return session
+
     def status(self) -> dict:
         """Rich snapshot of active meetings for the Jitsi page."""
         with self._lock:

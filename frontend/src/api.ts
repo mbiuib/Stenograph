@@ -99,6 +99,12 @@ export const api = {
       body: form,
     });
   },
+  jitsiStop: (options: { meetingId?: string; jobId?: string }): Promise<Job> => {
+    const form = new FormData();
+    if (options.meetingId) form.append("meeting_id", options.meetingId);
+    if (options.jobId) form.append("job_id", options.jobId);
+    return request<Job>("/api/jitsi/stop", { method: "POST", body: form });
+  },
   liveDevices: (): Promise<LiveDevices> => request<LiveDevices>("/api/live/devices"),
   liveStart: (tracks: string[], language?: string): Promise<Job> => {
     const form = new FormData();
