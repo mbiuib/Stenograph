@@ -30,7 +30,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import __version__, loopwatch, metrics, model_budget
-from ..audio import ensure_mix, existing_tracks, mixable_tracks, source_file, track_kind
+from ..audio import (
+    ensure_mix,
+    existing_tracks,
+    mixable_tracks,
+    playable_source,
+    track_kind,
+)
 from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
 from ..bridge.session import MeetingSession
@@ -243,6 +249,9 @@ def create_app(
     def job_audio(job_id: str) -> FileResponse:
         """Default playable stream of a job: the source file or a mixed recording.
 
+        File jobs with an audio upload stream it as-is; video and other
+        containers are transcoded once into a cached MP3 (``data/audio``) —
+        ``<audio>`` cannot be expected to decode arbitrary video containers.
         Recordings whose tracks share one clock (live; Jitsi on the realtime
         timeline) are mixed into a single track with ffmpeg and cached under
         ``data/mixes``. Old Jitsi meetings kept speech only — no honest mix —
@@ -253,10 +262,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="job not found")
         kind = track_kind(job)
         if kind == "file":
-            direct = source_file(job)
-            if direct is None:
-                raise HTTPException(status_code=404, detail="исходный файл недоступен")
-            return FileResponse(direct)
+            try:
+                return FileResponse(playable_source(settings, job))
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
         tracks = mixable_tracks(job)
         if tracks:
             if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import time
 from pathlib import Path
 from urllib.parse import quote
 
+import pytest
 from fastapi.testclient import TestClient
 
 import stenograph.api.app as app_module
@@ -179,3 +183,106 @@ def test_audio_reprocess_follows_the_recording_kind(tmp_path: Path, monkeypatch)
     repo.save(jitsi)
     assert client.get(f"/api/jobs/{jitsi.id}/audio").status_code == 404
     assert client.get(f"/api/jobs/{jitsi.id}/audio/{quote('Спикер 1')}").status_code == 200
+
+
+def test_audio_video_source_gets_an_extracted_track(tmp_path: Path, monkeypatch) -> None:
+    """A video upload plays through the extracted MP3, not the raw container."""
+    client, repo, settings = _stack(tmp_path)
+    video = tmp_path / "meeting.mp4"
+    video.write_bytes(b"\x00" * 64)
+    job = Job(
+        kind="file", source_name="meeting.mp4", source_path=str(video), status=JobStatus.DONE
+    )
+    repo.save(job)
+
+    calls: list[str] = []
+
+    def fake_extract(settings_arg, job_arg):  # noqa: ANN001, ANN202 — подмена ffmpeg-извлечения
+        calls.append(job_arg.id)
+        out = settings_arg.data_dir / "audio" / f"{job_arg.id}.mp3"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"EXTRACTED")
+        return out
+
+    monkeypatch.setattr(app_module, "playable_source", fake_extract)
+    response = client.get(f"/api/jobs/{job.id}/audio")
+
+    assert response.status_code == 200
+    assert response.content == b"EXTRACTED"
+    assert calls == [job.id]
+
+
+def test_playable_source_serves_audio_files_directly(tmp_path: Path) -> None:
+    """Audio containers need no transcoding; a vanished upload is a ValueError."""
+    from stenograph.audio import playable_source
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.ensure_dirs()
+    clip = tmp_path / "clip.mp3"
+    clip.write_bytes(b"ID3" + b"\x00" * 16)
+    job = Job(kind="file", source_name="clip.mp3", source_path=str(clip), status=JobStatus.DONE)
+
+    assert playable_source(settings, job) == clip
+
+    missing = Job(kind="file", source_name="gone.mp3", source_path=str(tmp_path / "gone.mp3"))
+    with pytest.raises(ValueError, match="недоступен"):
+        playable_source(settings, missing)
+
+
+def test_playable_source_extracts_videos_and_caches(tmp_path: Path, monkeypatch) -> None:
+    """A video is extracted once; the cached copy is reused until the source changes."""
+    from stenograph import audio as audio_module
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.ensure_dirs()
+    video = tmp_path / "meeting.mp4"
+    video.write_bytes(b"\x00" * 50)
+    job = Job(
+        kind="file", source_name="meeting.mp4", source_path=str(video), status=JobStatus.DONE
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, capture_output=False, **kwargs):  # noqa: ANN001, ANN202 — подмена ffmpeg
+        calls.append(list(command))
+        out = Path(command[-1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"MP3")
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    first = audio_module.playable_source(settings, job)
+    assert first.read_bytes() == b"MP3"
+    assert len(calls) == 1 and "-vn" in calls[0]
+
+    # Кэш: пока источник не новее копии, ffmpeg не зовём.
+    second = audio_module.playable_source(settings, job)
+    assert second == first and len(calls) == 1
+
+    # Источник обновился — копия пересобирается.
+    newer = time.time() + 5
+    os.utime(video, (newer, newer))
+    assert audio_module.playable_source(settings, job) == first
+    assert len(calls) == 2
+
+
+def test_playable_source_raises_when_ffmpeg_fails(tmp_path: Path, monkeypatch) -> None:
+    """A broken video surfaces as RuntimeError, not an empty file."""
+    from stenograph import audio as audio_module
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.ensure_dirs()
+    video = tmp_path / "broken.mkv"
+    video.write_bytes(b"\x00" * 20)
+    job = Job(
+        kind="file", source_name="broken.mkv", source_path=str(video), status=JobStatus.DONE
+    )
+
+    def fake_run(command, capture_output=False, **kwargs):  # noqa: ANN001, ANN202 — подмена ffmpeg
+        return subprocess.CompletedProcess(command, 1, b"", b"Invalid data")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="не удалось извлечь звук"):
+        audio_module.playable_source(settings, job)

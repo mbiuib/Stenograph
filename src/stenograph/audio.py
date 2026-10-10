@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .config import Settings
 from .domain.models import Job
+from .media import AUDIO_EXTS
 
 log = logging.getLogger(__name__)
 
@@ -117,4 +118,49 @@ def ensure_mix(settings: Settings, job: Job, tracks: list[str]) -> Path:
             "не удалось собрать микс: " + completed.stderr.decode(errors="replace")[-300:]
         )
     log.info("аудио: микс %s собран (%d дорожек)", out.name, len(ordered))
+    return out
+
+
+def playable_source(settings: Settings, job: Job) -> Path:
+    """A browser-playable audio stream for a file job's upload.
+
+    Audio containers are served as-is. Anything else (video and other
+    containers) is transcoded ONCE into a small cached MP3 under
+    ``data/audio`` — an ``<audio>`` element cannot be expected to decode an
+    arbitrary video container (mkv, mov, ts…). The cache is invalidated by
+    mtime: a source newer than the copy triggers a rebuild. Raises
+    ValueError when the upload vanished, RuntimeError when ffmpeg fails.
+    """
+    source = source_file(job)
+    if source is None:
+        raise ValueError("исходный файл недоступен")
+    if source.suffix.lower() in AUDIO_EXTS:
+        return source
+    out = settings.data_dir / "audio" / f"{job.id}.mp3"
+    if out.is_file() and out.stat().st_mtime >= source.stat().st_mtime:
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        settings.ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        MIX_BITRATE,
+        str(out),
+    ]
+    completed = subprocess.run(command, capture_output=True)  # noqa: S603 — local ffmpeg
+    if completed.returncode != 0 or not out.is_file():
+        raise RuntimeError(
+            "не удалось извлечь звук: " + completed.stderr.decode(errors="replace")[-300:]
+        )
+    log.info("аудио: дорожка %s извлечена из %s", out.name, source.name)
     return out
