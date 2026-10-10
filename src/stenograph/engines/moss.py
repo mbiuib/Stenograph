@@ -209,6 +209,13 @@ class MossEngine:
         self._torch: Any = None
         self._lock = threading.RLock()
 
+    # Model loading mutates GLOBAL transformers/torch state (the meta-device
+    # init context), so two lazy loads running at once corrupt each other
+    # ("Cannot copy out of meta tensor") — parallel queue workers each hold
+    # their OWN engine instance, hence the load lock MUST be class-level,
+    # not per-instance.
+    _load_lock = threading.Lock()
+
     def unload(self) -> None:
         """Release the model and free GPU memory."""
         with self._lock:
@@ -237,8 +244,14 @@ class MossEngine:
         return self.model_id, False
 
     def _load(self) -> tuple[Any, Any, Any]:
-        """Load model and processor once per process (thread-safe)."""
-        with self._lock:
+        """Load model and processor once per instance.
+
+        Loads from ALL instances serialize through the class-level lock:
+        parallel workers each hold their own engine, and concurrent
+        ``from_pretrained`` calls corrupt transformers' global meta-device
+        context ("Cannot copy out of meta tensor").
+        """
+        with self._load_lock:
             if self._model is not None:
                 return self._torch, self._model, self._processor
             try:
