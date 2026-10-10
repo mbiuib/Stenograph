@@ -466,8 +466,8 @@ async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Pat
             abort = f"VRAM: свободно всего {row['vram_free_mb']} МБ"
         elif row.get("loop_lag_max_ms") and row["loop_lag_max_ms"] >= 5000:
             abort = f"event loop вставал на {row['loop_lag_max_ms']} мс"
-        elif row.get("rss_mb") and row["rss_mb"] >= 8000:
-            abort = f"RSS сервера {row['rss_mb']} МБ"
+        elif args.rss_wall and row.get("rss_mb") and row["rss_mb"] >= args.rss_wall:
+            abort = f"RSS сервера {row['rss_mb']} МБ (стена {args.rss_wall})"
         if abort and not state.get("abort"):
             state["abort"] = f"{abort} (K={state['meetings_started']})"
             print(f"[{ts()}] !!! СТЕНА: {state['abort']}", flush=True)
@@ -603,6 +603,12 @@ async def main() -> None:
         type=float,
         default=60,
         help="секунд между сменами состава говорящих (0 = не менять)",
+    )
+    parser.add_argument(
+        "--rss-wall",
+        type=int,
+        default=8000,
+        help="стена по RSS сервера, МБ (0 = без стены; для 20+ встреч поднимать)",
     )
     parser.add_argument("--port", type=int, default=8010, help="порт скретч-сервера")
     parser.add_argument(
