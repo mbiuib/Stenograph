@@ -1,10 +1,26 @@
 # Jitsi + Jigasi в Docker на Windows — развёртывание «одной кнопкой»
 
-Пакет развёртывания полного стека **Jitsi Meet** (web, prosody, jicofo,
-jvb) с транскрайбером **jigasi**, который передаёт аудио участников
-серверу транскрибации «Стенограф» по протоколу streaming-whisper.
-Запуск — двойным кликом по `start.bat`; весь стек работает в Docker
-Desktop.
+Пакет развёртывания полного стека **Jitsi Meet** (web, prosody, jicofo, jvb)
+с транскрайбером **jigasi**, который передаёт аудио участников серверу
+транскрибации **«Стенограф»** по протоколу streaming-whisper. Запуск —
+двойным кликом по `start.bat`; весь стек работает в Docker Desktop.
+
+```mermaid
+flowchart LR
+    subgraph winhost["Хост Windows"]
+        subgraph dd["Docker Desktop (движок WSL2)"]
+            web["web<br/>:8443 / :8081"]
+            prosody["prosody"]
+            jicofo["jicofo"]
+            jvb["jvb<br/>:10000/udp"]
+            jigasi["transcriber<br/>(jigasi)"]
+        end
+        sten["Сервер «Стенограф»<br/>:443 · TLS"]
+    end
+    guests["Участники<br/>(браузеры)"] -- "HTTPS :8443" --> web
+    guests <-. "аудио WebRTC" .-> jvb
+    jigasi -- "WSS /ws/…" --> sten
+```
 
 ## О платформе
 
@@ -30,8 +46,8 @@ Desktop.
 - Свободные порты: **8081/tcp**, **8443/tcp**, **10000/udp** (плюс 8080 и
   8888, слушаются только на 127.0.0.1). Заняты — измените `HTTP_PORT` /
   `HTTPS_PORT` / `JVB_PORT` в `.env`.
-- Сервер «Стенографа», доступный из контейнеров (по умолчанию — на этой же
-  машине; см. «Интеграция»).
+- Сервер «Стенографа», доступный из контейнеров (по умолчанию — на том же
+  хосте; см. «Интеграция»).
 - Опционально: **Git for Windows** — из его OpenSSL `start.bat` выпускает
   доверенный локальный сертификат. Без Git стек тоже поднимается, но на
   встроенном самоподписанном сертификате.
@@ -48,6 +64,15 @@ Desktop.
 `set STENOGRAPH_NOPAUSE=1`.
 
 `start.bat` выполняет шесть шагов:
+
+```mermaid
+flowchart TD
+    s1["1 · .env: LAN-адрес, пароли"] --> s2["2 · Docker Desktop запущен"]
+    s2 --> s3["3 · правила firewall (best effort)"]
+    s3 --> s4["4 · сертификат web + JVM trust файл"]
+    s4 --> s5["5 · compose up + самолечение гонки входа jigasi"]
+    s5 --> s6["6 · ожидание страницы → READY"]
+```
 
 1. создаёт `.env` — LAN-адрес машины и случайные пароли (если файла нет);
 2. проверяет Docker Desktop и при необходимости запускает его;
@@ -70,6 +95,24 @@ Desktop.
   IP сертификат нужно перевыпустить (см. ниже).
 
 ## Сертификаты
+
+Две независимые цепочки доверия: браузеры участников доверяют веб-интерфейсу
+Jitsi, а контейнер `transcriber` — сертификату сервера «Стенографа».
+
+```mermaid
+flowchart TD
+    subgraph jitsi_side["Сертификат веб-интерфейса Jitsi"]
+        ca["Локальный CA<br/>«Stenograph Local CA»"] --> webcrt["config/web/keys/cert.crt"]
+        ca --> cacrt["ca.crt — гостям<br/>install-ca.bat"]
+    end
+    subgraph st_side["Доверие к серверу «Стенографа»"]
+        stca["stenograph-ca.crt<br/>рядом со start.bat"] --> customca["config/transcriber/custom-ca"]
+        customca --> jvm["config/transcriber/java-cacerts<br/>штатные CA + ваш"]
+        jvm -- "монтируется поверх<br/>/etc/ssl/certs/java/cacerts" --> jigasi["transcriber (jigasi)"]
+    end
+    webcrt --> web["web :8443"]
+    cacrt --> guests["Браузеры гостей"]
+```
 
 По умолчанию пакет создаёт собственный центр сертификации
 («Stenograph Local CA», папка `ca\`) и выпускает сертификат на LAN-IP
@@ -116,12 +159,12 @@ JIGASI_TRANSCRIBER_WHISPER_URL=wss://host.docker.internal/ws
 - По умолчанию «Стенограф» отдаёт HTTPS сам (нативный TLS, `:443`), поэтому
   используется `wss://`. `host.docker.internal` — обращение к хостовой
   машине (Docker Desktop). Если «Стенограф» работает на другом сервере,
-  укажите его адрес (`wss://server/ws`).
+  укажите его адрес (`wss://<адрес>/ws`).
 - Сертификат сервера должен покрывать это имя/адрес (SAN). Пакетный
   `scripts/make_cert.sh` уже добавляет `DNS:host.docker.internal` в SAN.
 - Чтобы Jigasi доверял сертификату, положите его `ca.crt` (PEM) рядом с
-  `start.bat` под именем **`stenograph-ca.crt`** — `start.bat` скопирует его в
-  `config\transcriber\custom-ca\` и **пересоберёт JVM-хранилище доверия**
+  `start.bat` под именем **`stenograph-ca.crt`** — `start.bat` скопирует его
+  в `config\transcriber\custom-ca\` и **пересоберёт JVM-хранилище доверия**
   (`config\transcriber\java-cacerts`), которое `transcriber.yml` монтирует
   поверх системного. Это обязательный шаг: Jetty-клиент внутри jigasi читает
   встроенное JVM-хранилище и игнорирует кастомные trust store (проверено
@@ -131,8 +174,8 @@ JIGASI_TRANSCRIBER_WHISPER_URL=wss://host.docker.internal/ws
   `ws://host.docker.internal:8000/ws` — CA в этом случае не нужен.
 - Транскрипция включается в комнате модератором: **More actions →
   Closed captions → Start closed captions**. Jigasi заходит скрытым
-  участником и передаёт аудио каждого говорящего; субтитры идут в Jitsi,
-  а в «Стенографе» появляется живая задача «Jitsi — …».
+  участником и передаёт аудио каждого говорящего; в «Стенографе» появляется
+  живая задача «Jitsi — …».
 - Описание протокола и диагностика — `docs/JITSI.md`.
 
 Проверка:
