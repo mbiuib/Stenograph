@@ -83,6 +83,9 @@ def create_app(
     # Record-only sessions (realtime_transcribe=false) don't decode, so they
     # never hold the queue — their recordings flow through it like files.
     service.realtime_provider = lambda: live.has_decoding() or bridge.has_decoding()
+    # A fresh process starts with an empty in-memory queue: bring back the
+    # jobs orphaned by the previous shutdown (see Settings.restart_recover).
+    service.recover_after_restart()
 
     @contextlib.asynccontextmanager
     async def lifespan(_web: FastAPI) -> AsyncIterator[None]:
@@ -347,6 +350,7 @@ def create_app(
             "reprocess_engine": settings.reprocess_engine,
             "bridge_language": settings.bridge_language,
             "jitsi_idle_stop_sec": settings.jitsi_idle_stop_sec,
+            "restart_recover": settings.restart_recover,
             "realtime_transcribe": settings.realtime_transcribe,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,

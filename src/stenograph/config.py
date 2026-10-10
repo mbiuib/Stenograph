@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # "everybody left, but a forgotten client keeps the room alive" case:
     # Jigasi only disconnects when the last real participant leaves.
     jitsi_idle_stop_sec: float = 600.0
+    # MEETSCRIBE_RESTART_RECOVER: a fresh process starts with an empty
+    # in-memory queue, so queued/running rows are jobs orphaned by a previous
+    # shutdown. True (default): waiting jobs return to the queue and
+    # interrupted ones restart from scratch in the same job. False: orphans
+    # are only marked "interrupted by a server stop" (retry manually).
+    restart_recover: bool = True
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

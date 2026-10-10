@@ -285,13 +285,17 @@ class TranscriptionService:
         self.bus.publish(job.id, {"type": "meta", "meta": job.meta})
         return child
 
+    def _queue_up(self, job_id: str) -> None:
+        """Put a persisted job id on the in-memory queue (worker wake-up)."""
+        with self._lock:
+            self._cancel_events[job_id] = threading.Event()
+            self._waiting.append(job_id)
+        self._queue.put(job_id)
+
     def _enqueue(self, job: Job) -> Job:
         """Persist a job and put it on the single-worker queue."""
         self.repo.save(job)
-        with self._lock:
-            self._cancel_events[job.id] = threading.Event()
-            self._waiting.append(job.id)
-        self._queue.put(job.id)
+        self._queue_up(job.id)
         log.info("queued job %s (%s)", job.id, job.source_name)
         return job
 
@@ -329,6 +333,56 @@ class TranscriptionService:
             key=queue_priority,  # display order == execution order
         )
         return {"active": active, "waiting": waiting}
+
+    def recover_after_restart(self) -> dict[str, int]:
+        """Bring back jobs orphaned by a previous process (queue is in memory).
+
+        A fresh process starts with an empty queue, so any job left
+        ``queued``/``running`` in the repository belongs to a dead worker.
+        With ``restart_recover`` (default) waiting jobs return to the queue
+        as-is and interrupted ones restart from scratch in the SAME job —
+        progress resets, the history gets no duplicates and the parent links
+        (reprocess_job, analysis) stay intact. Recordings (live/jitsi) cannot
+        resume — their capture died with the old process — so they are only
+        marked interrupted, keeping the transcript recorded so far. With the
+        flag off every orphan is merely marked, so the retry / improve
+        buttons unblock.
+
+        Returns counts: ``requeued`` (was waiting), ``restarted`` (was
+        interrupted mid-run), ``marked`` (only set to interrupted).
+        """
+        stats = {"requeued": 0, "restarted": 0, "marked": 0}
+        orphans = self.repo.list_jobs(status=JobStatus.QUEUED, limit=1000)
+        orphans += self.repo.list_jobs(status=JobStatus.RUNNING, limit=1000)
+        for job in sorted(orphans, key=lambda item: item.created_at):
+            if job.kind in ("live", "jitsi") or not self.settings.restart_recover:
+                job.status = JobStatus.ERROR
+                job.message = "Прервано остановкой сервера"
+                job.finished_at = time.time()
+                self.repo.save(job)
+                stats["marked"] += 1
+                continue
+            if job.status == JobStatus.RUNNING:
+                # Interrupted mid-run: restart from scratch in the same job.
+                job.progress = 0
+                job.error = None
+                job.started_at = None
+                job.finished_at = None
+                stats["restarted"] += 1
+            else:
+                stats["requeued"] += 1
+            job.status = JobStatus.QUEUED
+            job.message = ""
+            self.repo.save(job)
+            self._queue_up(job.id)
+        if orphans:
+            log.warning(
+                "restart recovery: %d requeued, %d restarted, %d marked interrupted",
+                stats["requeued"],
+                stats["restarted"],
+                stats["marked"],
+            )
+        return stats
 
     # -- worker -------------------------------------------------------------
 
