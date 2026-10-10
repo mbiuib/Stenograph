@@ -7,25 +7,84 @@ source without speech is skipped. Sources are given explicitly (files or
 directories), or — without arguments — discovered locally: the monitor-test
 feed sample, recent live recordings (system.wav + mic.wav) and the largest
 participant track of each of the newest jitsi jobs. Stale samples left from
-previous runs are pruned after a successful cut.
+previous runs are pruned after a successful cut. Sources of any format are
+accepted — anything that is not already 16 kHz mono WAV is converted via
+ffmpeg (MEETSCRIBE_FFMPEG from the project .env, or PATH).
 
 Usage:
   .venv/Scripts/python.exe loadtest/prepare_samples.py [--per-source 3]
-      [--chunk-sec 14] [--latest-live 6] [--from-jitsi 8] [файл.wav | папка ...]
+      [--chunk-sec 14] [--latest-live 6] [--from-jitsi 8] [файл | папка ...]
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
+import tempfile
 import wave
 from pathlib import Path
 
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 OUT = HERE / "samples"
 SILENT_RMS = 0.004  # ниже этого среднего RMS источник считается молчащим
+SOURCE_GLOBS = ("*.wav", "*.mp3", "*.m4a", "*.aac", "*.flac", "*.ogg", "*.opus", "*.wma")
+
+
+def find_ffmpeg() -> str | None:
+    """ffmpeg: переменная окружения → .env проекта → PATH."""
+    env = os.environ.get("MEETSCRIBE_FFMPEG")
+    if env and Path(env).exists():
+        return env
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "MEETSCRIBE_FFMPEG":
+                value = value.strip().strip('"').strip("'")
+                if Path(value).exists():
+                    return value
+    return shutil.which("ffmpeg")
+
+
+def ensure_wav16k(source: Path, ffmpeg: str | None, temp_dir: Path) -> Path | None:
+    """Путь к WAV 16 кГц моно: исходник, если он уже такой, иначе конверсия."""
+    try:
+        with wave.open(str(source)) as src:
+            if src.getframerate() == 16000 and src.getnchannels() == 1:
+                return source
+        reason = "не 16 кГц моно"
+    except wave.Error:
+        reason = "не WAV"
+    if not ffmpeg:
+        print(f"  пропускаю ({reason}; ffmpeg не найден — перегнать вручную)")
+        return None
+    target = temp_dir / (source.stem + ".conv.wav")
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(target),
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not target.exists() or target.stat().st_size == 0:
+        print(f"  пропускаю ({reason}; ffmpeg не осилил): {source.name}")
+        return None
+    print(f"  {source.name}: {reason} → перегнал в 16 кГц моно")
+    return target
 
 
 def find_sources(latest_live: int, from_jitsi: int) -> list[Path]:
@@ -141,7 +200,8 @@ def main() -> None:
     sources: list[Path] = []
     for item in args.sources:
         if item.is_dir():
-            sources.extend(sorted(item.glob("*.wav")))
+            for pattern in SOURCE_GLOBS:
+                sources.extend(sorted(item.glob(pattern)))
         else:
             sources.append(item)
     if not sources:
@@ -152,15 +212,23 @@ def main() -> None:
             "prepare_samples.py путь/к/записи.wav ..."
         )
     OUT.mkdir(parents=True, exist_ok=True)
+    ffmpeg = find_ffmpeg()
+    temp_dir = Path(tempfile.mkdtemp(prefix="prepare-samples-"))
     total = 0
-    for source in sources:
-        if not source.exists():
-            print(f"пропускаю (нет файла): {source}")
-            continue
-        made = cut(source, args.per_source, args.chunk_sec, OUT, total)
-        if made:
-            print(f"{source} → {made} чанк(ов) по {args.chunk_sec:.0f} с")
-        total += made
+    try:
+        for source in sources:
+            if not source.exists():
+                print(f"пропускаю (нет файла): {source}")
+                continue
+            wav = ensure_wav16k(source, ffmpeg, temp_dir)
+            if wav is None:
+                continue
+            made = cut(wav, args.per_source, args.chunk_sec, OUT, total)
+            if made:
+                print(f"{source} → {made} чанк(ов) по {args.chunk_sec:.0f} с")
+            total += made
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
     if total > 0:  # после успешной нарезки чистим хвосты прошлых наборов
         fresh = {f"sample_{i:02d}.wav" for i in range(total)}
         for old in sorted(OUT.glob("sample_*.wav")):
