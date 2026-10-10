@@ -83,6 +83,30 @@ def ssl_context_for(ws_base: str) -> ssl.SSLContext | None:
     return context
 
 
+def _is_loopback(api_base: str) -> bool:
+    """True when the target is this machine (its media dirs are local)."""
+    host = urllib.parse.urlsplit(api_base).hostname or ""
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _remove_local_media(job_ids: set[str]) -> int:
+    """Remove deleted jobs' media dirs/caches when the target is local."""
+    removed = 0
+    for job_id in job_ids:
+        directory = ROOT / "data" / "jitsi" / job_id
+        if directory.is_dir():
+            shutil.rmtree(directory, ignore_errors=True)
+            removed += 1
+        for cache in (
+            ROOT / "data" / "audio" / f"{job_id}.mp3",
+            ROOT / "data" / "mixes" / f"{job_id}.mp3",
+        ):
+            if cache.is_file():
+                with contextlib.suppress(OSError):
+                    cache.unlink()
+    return removed
+
+
 def load_samples() -> list[np.ndarray]:
     """Read every 16 kHz mono WAV from loadtest/samples/ as int16 arrays."""
     samples = []
@@ -496,6 +520,8 @@ async def cleanup_jobs(client: httpx.AsyncClient, api_base: str, started_wall: f
         print(f"[{ts()}] уборка: список задач недоступен ({exc!r})", flush=True)
         return
     removed = kept = 0
+    deleted_ids: set[str] = set()
+    kept_jobs: list[dict] = []
     pending: list[dict] = []
     for job in jobs:
         if not is_ours(job):
@@ -503,6 +529,7 @@ async def cleanup_jobs(client: httpx.AsyncClient, api_base: str, started_wall: f
         status = job.get("status")
         if status in ("queued", "running") and job.get("kind") == "jitsi":
             kept += 1
+            kept_jobs.append(job)
             print(f"[{ts()}] уборка: {job['source_name'][:52]} ещё {status} — оставляю", flush=True)
             continue
         if status in ("queued", "running"):
@@ -512,6 +539,7 @@ async def cleanup_jobs(client: httpx.AsyncClient, api_base: str, started_wall: f
             continue
         if await _delete_job(client, api_base, job):
             removed += 1
+            deleted_ids.add(job["id"])
     for _ in range(20):  # отменённым детям нужно время дойти до cancelled
         if not pending:
             break
@@ -528,17 +556,28 @@ async def cleanup_jobs(client: httpx.AsyncClient, api_base: str, started_wall: f
             current = fresh.get(job["id"])
             if current is None:
                 removed += 1
+                deleted_ids.add(job["id"])
             elif current.get("status") in ("queued", "running"):
                 still.append(current)
             elif await _delete_job(client, api_base, current):
                 removed += 1
+                deleted_ids.add(job["id"])
         pending = still
     for job in pending:
         kept += 1
+        kept_jobs.append(job)
         print(
             f"[{ts()}] уборка: {job['source_name'][:52]} всё ещё {job.get('status')} — оставляю",
             flush=True,
         )
+    # Локальная цель: вместе с задачами убираем их медиа-папки — сервер при
+    # удалении задачи каталог data/jitsi/<id> и аудио-кэши сам не трогает.
+    protected = {str(j.get("meta", {}).get("parent") or "") for j in kept_jobs}
+    media_ids = {job_id for job_id in deleted_ids if job_id not in protected}
+    if media_ids and _is_loopback(api_base):
+        removed_dirs = _remove_local_media(media_ids)
+        if removed_dirs:
+            print(f"[{ts()}] уборка: медиа-папок удалено — {removed_dirs}", flush=True)
     print(f"[{ts()}] уборка: удалено {removed}, оставлено {kept}", flush=True)
 
 
