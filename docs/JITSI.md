@@ -149,6 +149,16 @@ org.jitsi.jigasi.transcription.whisper.websocket_url=ws://<адрес-стено
 - Если встреча идёт не в вашем Jitsi — серверного способа нет, только
   локальный захват (микрофон + системный звук).
 
+## Windows-стенд «одной кнопкой»
+
+Тот же стек можно поднять локально на Windows (Docker Desktop + WSL2):
+папка **`deploy/jitsi-windows/`** — `start.bat` делает всё сам (env →
+Docker Desktop → сертификаты → compose up → самолечение гонки →
+READY), jigasi ходит на `ws://host.docker.internal:8000/ws`. Полная
+инструкция и траблшутинг — `deploy/jitsi-windows/README.md`.
+Проверено вживую (10.10.2026): комната → CC → задача «Jitsi — …» в вебе
+→ done.
+
 ## Как объяснить руководителю (в двух предложениях)
 
 Мы встроились в корпоративный Jitsi штатным механизмом Jigasi: сервер сам

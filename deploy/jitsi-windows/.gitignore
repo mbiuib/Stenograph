@@ -1,0 +1,4 @@
+# local machine state - never commit
+.env
+config/
+ca/
