@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # MEETSCRIBE_ASR_PORT: port of the external ASR service (asr_service.py,
     # start_asr.bat) that serves whisper/moss in a separate process.
     asr_port: int = 9001
+    # MEETSCRIBE_ASR_BACKEND: where ASR runs — "local" (in-process, default)
+    # or "remote" (the external service over HTTP; no models in this process).
+    asr_backend: str = "local"
+    # MEETSCRIBE_ASR_URL: base URL of the external ASR service (remote mode).
+    asr_url: str = "http://127.0.0.1:9001"
+    # MEETSCRIBE_ASR_TIMEOUT_SEC: HTTP timeout of one file transcription call.
+    asr_timeout_sec: float = 1800.0
     log_level: str = "INFO"
 
     ffmpeg: str = "ffmpeg"

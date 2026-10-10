@@ -34,6 +34,22 @@ def get_asr(name: str, settings: Settings) -> AsrEngine:
     return _ASR_FACTORIES[name](settings)
 
 
+def make_asr(name: str, settings: Settings) -> AsrEngine:
+    """Instantiate the engine for ``name`` on the configured backend.
+
+    "local" builds the registered engine in-process; "remote" returns a
+    RemoteAsrEngine that ships the audio to the external ASR service — the
+    model then lives in that process, not here.
+    """
+    if settings.asr_backend == "remote":
+        if name not in _ASR_FACTORIES:
+            raise KeyError(f"unknown ASR engine '{name}'; available: {available_asr()}")
+        from .remote import RemoteAsrEngine
+
+        return RemoteAsrEngine(name, settings)
+    return get_asr(name, settings)
+
+
 def _register_builtin() -> None:
     from .moss import MossEngine
     from .whisper import FasterWhisperEngine

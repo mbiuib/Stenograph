@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import wave
 from pathlib import Path
@@ -12,6 +13,17 @@ from fastapi.testclient import TestClient
 from fakes import FakeEngine, speech_audio
 from stenograph.asr_service import create_app
 from stenograph.config import Settings
+
+
+class FakeWindowEngine(FakeEngine):
+    """FakeEngine plus the realtime-window methods of the whisper engine."""
+
+    def transcribe_batch(self, windows, *, language=None):
+        """Echo each window's duration so callers can see which audio arrived."""
+        return [
+            [(0.0, round(len(window) / 16000.0, 2), f"окно {index}")]
+            for index, window in enumerate(windows)
+        ]
 
 
 def _wav_bytes(seconds: float = 1.0) -> bytes:
@@ -36,7 +48,7 @@ def client(tmp_path: Path):
         if name not in {"whisper", "moss"}:
             raise KeyError(f"unknown ASR engine '{name}'; available: ['moss', 'whisper']")
         seen.append(name)
-        return FakeEngine()
+        return FakeWindowEngine() if name == "whisper" else FakeEngine()
 
     with TestClient(create_app(settings=settings, engine_factory=build)) as test_client:
         yield test_client, seen
@@ -100,3 +112,33 @@ def test_unknown_model_is_404(client) -> None:
         data={"model": "nope"},
     )
     assert response.status_code == 404
+
+
+def test_realtime_windows_roundtrip(client) -> None:
+    """Windows decode to audio and come back as word tuples."""
+    test_client, seen = client
+    windows = [
+        base64.b64encode(_wav_bytes(0.3)).decode("ascii"),
+        base64.b64encode(_wav_bytes(0.5)).decode("ascii"),
+    ]
+    response = test_client.post(
+        "/v1/realtime/windows",
+        json={"model": "whisper", "language": "ru", "windows": windows},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["windows"] == [[[0.0, 0.3, "окно 0"]], [[0.0, 0.5, "окно 1"]]]
+    assert seen == ["whisper"]
+
+
+def test_realtime_windows_requires_a_window_capable_engine(client) -> None:
+    """Moss has no window methods — the endpoint says so explicitly."""
+    test_client, _ = client
+    response = test_client.post(
+        "/v1/realtime/windows",
+        json={
+            "model": "moss",
+            "windows": [base64.b64encode(_wav_bytes(0.3)).decode("ascii")],
+        },
+    )
+    assert response.status_code == 400

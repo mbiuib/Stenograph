@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .config import Settings, clean_language, get_settings
 from .domain.models import Job, JobStatus
-from .engines import available_asr, get_asr
+from .engines import available_asr, make_asr
 from .engines.base import AsrEngine, TranscribeOptions
 from .events import EventBus
 from .llm.analyzer import transcript_text
@@ -584,7 +584,7 @@ class TranscriptionService:
             engine = (
                 self._engine_factory(name, self.settings)
                 if self._engine_factory
-                else get_asr(name, self.settings)
+                else make_asr(name, self.settings)
             )
             cache[name] = engine
         return engine

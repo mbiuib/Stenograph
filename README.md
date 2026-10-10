@@ -368,8 +368,21 @@ curl -s -F file=@запись.wav -F model=moss -F response_format=verbose_json 
   http://127.0.0.1:9001/v1/audio/transcriptions          # + segments/спикеры
 ```
 
-Основной сервер пока работает со встроенными движками; переключение клиента
-на сервис (`MEETSCRIBE_ASR_BACKEND=remote`) — следующий шаг.
+Клиент готов: `MEETSCRIBE_ASR_BACKEND=remote` + `MEETSCRIBE_ASR_URL=...` переключают
+основной сервер на сервис — и файловые задачи (`transcribe`), и реалтайм-окна
+Live/Jitsi (`/v1/realtime/windows`); без них сервер работает со встроенными движками
+как раньше. В remote-режиме сервер не грузит модели вообще (и не может заморозить
+свой API инференсом).
+
+## Полный стек в Docker
+
+`deploy/stack/docker-compose.yml` — один композ поднимает **всё**: Jitsi
+(web/prosody/jicofo/jvb), jigasi-транскрайбер, сервер Стенографа (в remote-режиме,
+без моделей) и ASR-сервис (GPU). Все папки данных примонтированы к текущим
+хост-папкам (`data/`, `certs/`, `.env`, конфиг Jitsi, папка моделей) — между
+контейнерами ничего не копируется и не теряется. Запуск — `deploy/stack/start_stack.bat`
+(перед этим останови нативный сервер и standalone-стенд: общие порты). Подробности —
+`deploy/stack/README.md`.
 
 ## Структура репозитория
 

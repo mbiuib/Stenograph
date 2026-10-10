@@ -5,15 +5,18 @@ frozen by model inference (a heavy ramp used to block the event loop for
 minutes). The engines are the very same code and models the server uses
 built-in — only the process boundary is new.
 
-Endpoints (close enough to the OpenAI audio API for compatible clients):
+Endpoints:
 
   GET  /health                   — liveness + engine list
   GET  /v1/models                — one "model" per engine (whisper, moss)
   POST /v1/audio/transcriptions  — multipart: file, model, language,
-                                   response_format=json|verbose_json
+                                   response_format=json|verbose_json (OpenAI)
+  POST /v1/realtime/windows      — internal realtime extension: base64 WAV
+                                   windows in, word tuples out
 
-The main server keeps its built-in engines; pointing it at this service
-(MEETSCRIBE_ASR_BACKEND) is the next step.
+The main server switches to this service with MEETSCRIBE_ASR_BACKEND=remote
+and MEETSCRIBE_ASR_URL (see asr_client.py); with the default "local" it keeps
+its built-in engines and this service can run alongside, unused.
 
 Run: .venv/Scripts/python.exe -m stenograph.asr_service
 Port: MEETSCRIBE_ASR_PORT (default 9001); host: MEETSCRIBE_ASR_HOST.
@@ -30,8 +33,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from . import __version__, model_budget
+from .asr_client import decode_wav_b64
 from .config import Settings, get_settings
 from .engines import available_asr, get_asr
 from .engines.base import AsrEngine, AsrResult, NoSpeechError, TranscribeOptions
@@ -66,6 +71,14 @@ class EnginePool:
         """Names whose engines were already built in this process."""
         with self._lock:
             return sorted(self._engines)
+
+
+class WindowBatch(BaseModel):
+    """Internal realtime extension: a batch of raw audio windows."""
+
+    model: str = ""
+    language: str | None = None
+    windows: list[str]  # each: base64 of a 16 kHz mono int16 WAV
 
 
 def _text_of(result: AsrResult) -> str:
@@ -160,6 +173,32 @@ def create_app(
                 ],
             }
         return {"text": text}
+
+    @app.post("/v1/realtime/windows")
+    def realtime_windows(request: WindowBatch) -> dict:
+        """Realtime window batch used by the main server's live/Jitsi paths."""
+        name = request.model.strip() or settings.engine
+        try:
+            engine, call_lock = pool.get(name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        batch = getattr(engine, "transcribe_batch", None)
+        if batch is None:
+            raise HTTPException(
+                status_code=400, detail=f"engine '{name}' does not support realtime windows"
+            )
+        try:
+            windows = [decode_wav_b64(item) for item in request.windows]
+        except Exception as exc:  # base64/wave garbage from a client → a clean 400
+            raise HTTPException(status_code=400, detail=f"bad window payload: {exc}") from exc
+        with call_lock:
+            results = batch(windows, language=request.language)
+        return {
+            "windows": [
+                [[float(start), float(end), text] for start, end, text in words]
+                for words in results
+            ]
+        }
 
     return app
 

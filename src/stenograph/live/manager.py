@@ -77,6 +77,8 @@ def default_batch_transcriber_factory(settings: Settings) -> BatchTranscriberFac
 
 def _engine_bundle(settings: Settings) -> tuple[TranscriberFactory, BatchTranscriberFactory]:
     """Return (window, batch) factories bound to one lazily loaded engine."""
+    if settings.asr_backend == "remote":
+        return _remote_engine_bundle(settings)
     key = (
         settings.live_model,
         str(settings.models_dir or ""),
@@ -87,6 +89,40 @@ def _engine_bundle(settings: Settings) -> tuple[TranscriberFactory, BatchTranscr
         bundle = _ENGINE_FACTORIES.get(key)
         if bundle is None:
             bundle = _build_engine_bundle(settings)
+            _ENGINE_FACTORIES[key] = bundle
+        return bundle
+
+
+def _remote_engine_bundle(
+    settings: Settings,
+) -> tuple[TranscriberFactory, BatchTranscriberFactory]:
+    """Window factories backed by the external ASR service (no local model).
+
+    The realtime path always speaks whisper on the service side; the model
+    lives there, this process only marshals audio windows over HTTP.
+    """
+    from ..asr_client import RemoteAsrClient
+
+    key = ("remote", settings.asr_url, "", "")
+    with _ENGINE_FACTORIES_LOCK:
+        bundle = _ENGINE_FACTORIES.get(key)
+        if bundle is None:
+            client = RemoteAsrClient(settings.asr_url, file_timeout=settings.asr_timeout_sec)
+
+            def factory(language: str | None) -> WindowTranscriber:
+                def transcribe(audio: np.ndarray) -> list[WindowWord]:
+                    results = client.transcribe_windows([audio], model="whisper", language=language)
+                    return results[0] if results else []
+
+                return transcribe
+
+            def batch_factory(language: str | None) -> BatchWindowTranscriber:
+                def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
+                    return client.transcribe_windows(windows, model="whisper", language=language)
+
+                return transcribe
+
+            bundle = (factory, batch_factory)
             _ENGINE_FACTORIES[key] = bundle
         return bundle
 
