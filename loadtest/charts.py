@@ -44,12 +44,14 @@ def render(run_dir: Path) -> list[Path]:
     ks = [r.get("k") or 0 for r in rows]
     gpu = [r.get("gpu_pct") for r in rows]
     rtf = [None if r.get("rt_factor") is None else r["rt_factor"] * 100 for r in rows]
+    vram = [None if r.get("vram_used_mb") is None else r["vram_used_mb"] / 1024 for r in rows]
     d_avg = [r.get("delay_avg") for r in rows]
     d_max = [r.get("delay_max") for r in rows]
     rss = [r.get("rss_mb") for r in rows]
     cpu = [r.get("cpu_pct") for r in rows]
     loopmax = [r.get("loop_lag_max_ms") or 0 for r in rows]
     gx, gv = clean(xs, gpu)
+    vx, vv = clean(xs, vram)
     rx, rv = clean(xs, rtf)
     dx, dv = clean(xs, d_max)
     ax_, av_ = clean(xs, d_avg)
@@ -87,7 +89,7 @@ def render(run_dir: Path) -> list[Path]:
         ax.plot(seq, [r[1] for r in rounds], "o-", color="#d64545", label="раунд целиком")
         ax.plot(seq, [r[2] for r in rounds], "s--", color="#e0a030", label="сбор (дренаж кадров)")
         ax.plot(seq, [r[3] for r in rounds], "^-", color="#3d7dd6", label="инференс")
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=9, framealpha=1.0)
     else:
         ax.text(
             0.5,
@@ -109,24 +111,29 @@ def render(run_dir: Path) -> list[Path]:
     ax.set_ylabel("GPU %", color="#3d7dd6")
     ax.set_ylim(0, 105)
     ax2 = ax.twinx()
-    ax2.plot(rx, rv, color="#2e9e5b")
-    ax2.axhline(100, color="#2e9e5b", ls=":", lw=1)
-    ax2.set_ylabel("успеваем, % от реального времени", color="#2e9e5b")
-    ax2.set_ylim(0, 110)
+    ax2.plot(vx, vv, color="#7a4fd6")
+    ax2.set_ylabel("видеопамять, ГБ", color="#7a4fd6")
+    vram_peak = max([v for v in vram if v is not None] or [0])
+    ax2.set_ylim(0, max(vram_peak * 1.15, 1))
     for x, k in adds:
         ax.axvline(x, color="#999", ls="--", lw=0.8)
         ax.text(x, 103, f"K={k}", fontsize=7, ha="center", color="#666")
-    ax.set_title("GPU и успевание декодера (100% = не отстаём)")
+    ax.set_title(f"GPU: загрузка и видеопамять (пик {vram_peak:.1f} ГБ)")
     ax.set_xlabel("минуты от старта")
     ax.grid(alpha=0.3)
 
     ax = axes[1][0]
-    ax.plot(dx, dv, color="#d64545", label="макс задержка текста")
-    ax.plot(ax_, av_, color="#e0a030", label="средняя")
-    ax.set_title("Отставание текста (секунды) по встречам")
+    dm = ax.plot(dx, dv, color="#d64545", label="макс задержка текста")[0]
+    da = ax.plot(ax_, av_, color="#e0a030", label="средняя")[0]
+    ax.set_title("Отставание текста (с) и успевание декодера (100% = не отстаём)")
     ax.set_xlabel("минуты от старта")
     ax.set_ylabel("с")
-    ax.legend(fontsize=9)
+    ax3 = ax.twinx()
+    ok = ax3.plot(rx, rv, color="#2e9e5b", label="успеваем, % от реального времени")[0]
+    ax3.axhline(100, color="#2e9e5b", ls=":", lw=1)
+    ax3.set_ylabel("успеваем, %", color="#2e9e5b")
+    ax3.set_ylim(0, 110)
+    ax.legend(handles=[dm, da, ok], fontsize=9, framealpha=1.0)
     ax.grid(alpha=0.3)
     for x, _ in adds:
         ax.axvline(x, color="#999", ls="--", lw=0.8)

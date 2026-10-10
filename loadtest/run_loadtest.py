@@ -22,6 +22,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -646,6 +647,23 @@ async def main() -> None:
 
     proc = start_server(args, run_dir)
     stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    interrupted = {"once": False}
+
+    def _on_sigint(*_args: object) -> None:
+        """Ctrl+C — аккуратная остановка: встречи закроются, уборка отработает."""
+        if interrupted["once"]:
+            print(f"[{ts()}] повторный Ctrl+C — выхожу немедленно", flush=True)
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            raise KeyboardInterrupt
+        interrupted["once"] = True
+        print(
+            f"[{ts()}] Ctrl+C — завершаю аккуратно (встречи закроются, задачи уберутся)",
+            flush=True,
+        )
+        loop.call_soon_threadsafe(stop.set)
+
+    signal.signal(signal.SIGINT, _on_sigint)
     state: dict = {
         "meetings_started": 0,
         "speakers_started": 0,
@@ -660,23 +678,27 @@ async def main() -> None:
             sampler = asyncio.create_task(sample_loop(args, state, client, run_dir))
             tasks = []
             for k in range(1, args.meetings + 1):
-                if state["abort"] or time.monotonic() - started_mono > args.max_seconds:
+                if (
+                    state["abort"]
+                    or stop.is_set()
+                    or time.monotonic() - started_mono > args.max_seconds
+                ):
                     break
                 tasks.append(
                     asyncio.create_task(run_meeting(k, args, samples_pool, stop, state, client))
                 )
                 waited = 0.0
-                while waited < args.step and not state["abort"]:
+                while waited < args.step and not state["abort"] and not stop.is_set():
                     await asyncio.sleep(1)
                     waited += 1
-            if not state["abort"]:
+            if not state["abort"] and not stop.is_set():
                 print(
                     f"[{ts()}] рампа пройдена: встреч {state['meetings_started']}, "
                     f"держим {args.hold:.0f} с",
                     flush=True,
                 )
                 waited = 0.0
-                while waited < args.hold and not state["abort"]:
+                while waited < args.hold and not state["abort"] and not stop.is_set():
                     await asyncio.sleep(1)
                     waited += 1
             print(f"[{ts()}] завершаю: закрываю {len(tasks)} встреч", flush=True)
@@ -692,6 +714,7 @@ async def main() -> None:
             if external and not args.keep_jobs:
                 await cleanup_jobs(client, args.api_base, started_wall)
     finally:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         if proc is not None:  # чужой сервер не останавливаем никогда
             stop_server(proc, args.port)
             if not args.keep_data:
