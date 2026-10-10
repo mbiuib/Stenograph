@@ -414,7 +414,7 @@ def create_app(
     def get_metrics() -> dict:
         """Live resource snapshot: GPU, per-model memory, queue and live state."""
         view = service.queue_view()
-        return metrics.snapshot(
+        snapshot = metrics.snapshot(
             live=live.status(),
             bridge=bridge.status(),
             queue={
@@ -424,6 +424,13 @@ def create_app(
             },
             counts=service.repo.count_by_status(),
         )
+        # «В работе» не должен зависеть от давности последнего касания метрик:
+        # долгий MOSS-прогон держит движок busy десятки минут — это точный
+        # признак, а idle_sec между чанками успевает вырасти.
+        busy = model_budget.busy_models()
+        for row in snapshot.get("models", []):
+            row["busy"] = (row.get("engine"), row.get("model")) in busy
+        return snapshot
 
     @app.post("/api/models/unload")
     def unload_models() -> dict:

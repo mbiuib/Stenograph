@@ -141,3 +141,31 @@ def test_whisper_load_evicts_idle_models_and_unload_frees(monkeypatch) -> None:
     engine.unload()
     assert engine._model is None
     assert recorded == [("whisper", "tiny")]
+
+
+def test_busy_models_lists_engines_in_a_transcribe() -> None:
+    """busy_models() drives the monitor's «в работе» badge."""
+    engine = FakeEngine("moss", "moss-model")
+    assert model_budget.busy_models() == set()
+    model_budget.mark_busy(engine)
+    assert model_budget.busy_models() == {("moss", "moss-model")}
+    model_budget.mark_idle(engine)
+    assert model_budget.busy_models() == set()
+
+
+def test_moss_touch_metrics_is_throttled(monkeypatch) -> None:
+    """The MOSS token callback refreshes metrics at most once per 10 s."""
+    from stenograph.engines import moss as moss_module
+    from stenograph.engines.moss import MossEngine
+
+    calls: list[object] = []
+    monkeypatch.setattr(moss_module, "touch_engine", calls.append)
+    engine = MossEngine(model_id="org/model", models_dir=None)
+
+    engine._touch_metrics()
+    engine._touch_metrics()  # заглушено троттлингом
+    assert len(calls) == 1 and calls[0] is engine
+
+    engine._last_touch = 0.0  # окно прошло
+    engine._touch_metrics()
+    assert len(calls) == 2

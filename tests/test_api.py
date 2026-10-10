@@ -154,3 +154,34 @@ def test_models_unload_endpoint_frees_idle_engines(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json()["unloaded"] == ["whisper:turbo"]
     assert engine.unloaded == 1
+
+
+def test_metrics_marks_busy_models(tmp_path: Path, monkeypatch) -> None:
+    """The «в работе» badge survives long runs: busy beats a stale idle time."""
+    import stenograph.api.app as app_module
+    from stenograph import model_budget
+
+    class BusyEngine:
+        """Engine double whose (name, model) matches the metrics row."""
+
+        name = "moss"
+        model_id = "m"
+
+        def unload(self) -> None:
+            """Not used here."""
+
+    service = _make_service(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service))
+
+    def fake_snapshot(**kwargs):  # noqa: ANN001, ANN202 — фиксированный снапшот
+        return {"models": [{"engine": "moss", "model": "m", "idle_sec": 700.0}]}
+
+    monkeypatch.setattr(app_module.metrics, "snapshot", fake_snapshot)
+
+    row = client.get("/api/metrics").json()["models"][0]
+    assert row["busy"] is False  # давно без касаний — честный простой
+
+    engine = BusyEngine()
+    model_budget.mark_busy(engine)
+    row = client.get("/api/metrics").json()["models"][0]
+    assert row["busy"] is True  # идёт прогон — «в работе», несмотря на idle 700 с

@@ -153,6 +153,8 @@ class FasterWhisperEngine:
             raw_segments.append(
                 {"start": float(raw.start), "end": float(raw.end), "text": text, "words": words}
             )
+            # Долгий прогон не должен выглядеть «простоем» в мониторе.
+            touch_engine(self)
             if on_segment:
                 on_segment(
                     Segment(
@@ -170,6 +172,8 @@ class FasterWhisperEngine:
                 )
 
         final_segments = resplit_long_segments(raw_segments, MAX_SEGMENT_SEC)
+        # Финал прогона: только что отработавшая модель не «простой с начала».
+        touch_engine(self)
         return AsrResult(
             language=str(getattr(info, "language", "") or ""),
             language_probability=float(getattr(info, "language_probability", 0.0) or 0.0),

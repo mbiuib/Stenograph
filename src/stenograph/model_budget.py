@@ -141,6 +141,20 @@ def busy_count(engine: Unloadable) -> int:
         return entry.busy
 
 
+def busy_models() -> set[tuple[str, str]]:
+    """``(engine, model)`` pairs currently executing a transcribe call."""
+    result: set[tuple[str, str]] = set()
+    with _LOCK:
+        for entry in _ENTRIES.values():
+            engine = entry.ref()
+            if engine is None or entry.busy <= 0:
+                continue
+            result.add(
+                (str(getattr(engine, "name", "?")), str(getattr(engine, "model_id", "?")))
+            )
+    return result
+
+
 def evict_idle(
     *,
     exclude: object | None = None,

@@ -195,6 +195,8 @@ export interface ModelMemory {
   last_used_at: string;
   idle_sec: number | null;
   load_number: number;
+  /** true, пока модель выполняет transcribe (даже в долгом прогоне). */
+  busy?: boolean;
 }
 
 export interface MetricsSnapshot {

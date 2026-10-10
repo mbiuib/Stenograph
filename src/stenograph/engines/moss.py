@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -209,6 +210,7 @@ class MossEngine:
         self._processor: Any = None
         self._torch: Any = None
         self._lock = threading.RLock()
+        self._last_touch = 0.0
 
     # Model loading mutates GLOBAL transformers/torch state (the meta-device
     # init context), so two lazy loads running at once corrupt each other
@@ -216,6 +218,18 @@ class MossEngine:
     # their OWN engine instance, hence the load lock MUST be class-level,
     # not per-instance.
     _load_lock = threading.Lock()
+
+    def _touch_metrics(self) -> None:
+        """Refresh the metrics «last used» stamp (throttled to once per 10 s).
+
+        A long MOSS run (one chunk can take minutes) must not look idle in
+        the monitor; the token callback calls this between generations.
+        """
+        now = time.monotonic()
+        if now - self._last_touch < 10.0:
+            return
+        self._last_touch = now
+        touch_engine(self)
 
     def unload(self) -> None:
         """Release the model and free GPU memory."""
@@ -345,6 +359,7 @@ class MossEngine:
                     raise JobCancelled()
                 if pause_gate is not None:
                     pause_gate()
+                self._touch_metrics()
                 offset = plan[index][0]
                 self._report(on_progress, index, total, f"Чанк {index + 1}/{total}: генерация…")
 
@@ -355,6 +370,7 @@ class MossEngine:
                 def on_tokens(count: int, _index: int = index) -> None:
                     if is_cancelled and is_cancelled():
                         raise JobCancelled()
+                    self._touch_metrics()
                     self._report(
                         on_progress,
                         _index,
@@ -455,6 +471,7 @@ class MossEngine:
         if not all_segments:
             raise NoSpeechError("MOSS не обнаружил речи в аудио")
 
+        touch_engine(self)
         return AsrResult(
             language=options.language or "auto",
             language_probability=0.0,

@@ -127,7 +127,7 @@ export function MonitorPage() {
                     <span className="truncate text-sm font-medium">
                       {model.engine}: <span className="text-muted">{model.model}</span>
                     </span>
-                    {model.idle_sec != null && model.idle_sec < 30 ? (
+                    {model.busy || (model.idle_sec != null && model.idle_sec < 30) ? (
                       <span className="shrink-0 text-xs text-accent">в работе</span>
                     ) : (
                       <span className="shrink-0 text-xs text-muted">простой {fmtIdle(model.idle_sec)}</span>
