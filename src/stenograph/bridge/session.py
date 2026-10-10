@@ -185,6 +185,9 @@ class MeetingSession:
         self._lock = threading.Lock()  # guards participants/pending/segments
         self._participants: dict[str, _Participant] = {}
         self._pending: dict[str, list[np.ndarray]] = {}
+        self._pending_samples: dict[str, int] = {}  # queued audio samples per participant
+        self._dropped_samples: dict[str, int] = {}  # dropped backlog, for throttled warnings
+        self._drop_log_at: dict[str, float] = {}  # last drop warning per participant
         self._segments: list[Segment] = []
         self._out: queue.Queue[str] = queue.Queue()
         self._closed = threading.Event()
@@ -312,8 +315,17 @@ class MeetingSession:
             participant.next_offset = start + duration
             if self.transcribe:
                 if silence_sec:
-                    self._pending[participant_id].extend(_silence_blocks(silence_sec))
+                    blocks = _silence_blocks(silence_sec)
+                    self._pending[participant_id].extend(blocks)
+                    self._pending_samples[participant_id] = (
+                        self._pending_samples.get(participant_id, 0)
+                        + sum(block.size for block in blocks)
+                    )
                 self._pending[participant_id].append(audio)
+                self._pending_samples[participant_id] = (
+                    self._pending_samples.get(participant_id, 0) + audio.size
+                )
+                self._trim_pending(participant_id)
                 participant.tracker_fed = participant.next_offset
             participant.last_frame = time.monotonic()
             self._last_frame_monotonic = participant.last_frame
@@ -381,6 +393,7 @@ class MeetingSession:
         )
         self._participants[participant_id] = participant
         self._pending[participant_id] = []
+        self._pending_samples[participant_id] = 0
         self.job.meta.setdefault("participants", {})[participant_id] = label
         self.job.meta.setdefault("audio", {})[label] = str(path)
         log.info(
@@ -442,13 +455,17 @@ class MeetingSession:
                         )
                     catch_up = participant.next_offset - participant.tracker_fed
                     if catch_up >= MIN_PAUSE_SEC:
-                        self._pending[participant.participant_id].extend(
-                            _silence_blocks(catch_up)
+                        blocks = _silence_blocks(catch_up)
+                        self._pending[participant.participant_id].extend(blocks)
+                        self._pending_samples[participant.participant_id] = (
+                            self._pending_samples.get(participant.participant_id, 0)
+                            + sum(block.size for block in blocks)
                         )
                     participant.tracker_fed = participant.next_offset
                 else:
                     # Всё неразобранное — в мусор: часы догоним при включении.
                     self._pending[participant.participant_id] = []
+                    self._pending_samples[participant.participant_id] = 0
         self._repo.save(self.job)
         self._bus.publish(self.job.id, {"type": "meta", "meta": self.job.meta})
         if enabled:
@@ -476,16 +493,81 @@ class MeetingSession:
         """Pool registry key of one participant (unique across meetings)."""
         return f"{self.job.id}:{participant_id}"
 
-    def _drain_pending(self, participant_id: str) -> None:
-        """Move buffered frames into the participant's tracker (pool thread)."""
+    def _drain_pending(self, participant_id: str, *, unlimited: bool = False) -> None:
+        """Feed buffered frames into the participant's tracker (pool thread).
+
+        Frames are merged into one array before feeding: ``StreamTracker.feed``
+        is a plain append, so N per-frame calls copied the whole window N times
+        — the drain cost grew with the backlog (a collapsed round once spent
+        28 s collecting vs 2 s of inference). One merged append is a single
+        pass. At most ``bridge_drain_max_sec`` of audio is taken per call so an
+        overloaded round stays bounded; the remainder waits in the queue.
+        """
         with self._lock:
-            chunks = self._pending.get(participant_id, [])
-            self._pending[participant_id] = []
+            queue = self._pending.get(participant_id, [])
+            limit = 0 if unlimited else int(self._settings.bridge_drain_max_sec * SAMPLE_RATE)
+            if limit > 0:
+                take: list[np.ndarray] = []
+                acc = 0
+                split = 0
+                for index, chunk in enumerate(queue):
+                    take.append(chunk)
+                    acc += chunk.size
+                    split = index + 1
+                    if acc >= limit:
+                        break
+                rest = queue[split:]
+            else:
+                take, rest = queue, []
+                acc = sum(chunk.size for chunk in queue)
+            self._pending[participant_id] = list(rest)
+            self._pending_samples[participant_id] = max(
+                0, self._pending_samples.get(participant_id, 0) - acc
+            )
         participant = self._participants.get(participant_id)
-        if participant is None or participant.tracker is None:
+        if participant is None or participant.tracker is None or not take:
             return
-        for chunk in chunks:
-            participant.tracker.feed(chunk)
+        merged = take[0] if len(take) == 1 else np.concatenate(take)
+        participant.tracker.feed(merged)
+
+    def _trim_pending(self, participant_id: str) -> None:
+        """Drop the oldest queued frames when the backlog exceeds its cap.
+
+        The queue absorbs jitter; under sustained overload it would grow until
+        RAM runs out while the decoder falls ever further behind anyway.
+        Dropping the oldest audio bounds both — the recordings stay intact on
+        disk and the quality pass re-reads the WAVs after the meeting.
+        """
+        cap_sec = self._settings.bridge_pending_max_sec
+        if cap_sec <= 0:
+            return
+        queue = self._pending[participant_id]
+        total = self._pending_samples.get(participant_id, 0)
+        drop_target = total - int(cap_sec * SAMPLE_RATE)
+        if drop_target <= 0:
+            return
+        dropped = 0
+        split = 0
+        for index, chunk in enumerate(queue):
+            if dropped >= drop_target:
+                break
+            dropped += chunk.size
+            split = index + 1
+        del queue[:split]
+        self._pending_samples[participant_id] = total - dropped
+        self._dropped_samples[participant_id] = (
+            self._dropped_samples.get(participant_id, 0) + dropped
+        )
+        now = time.monotonic()
+        if now - self._drop_log_at.get(participant_id, 0.0) >= 10.0:
+            log.warning(
+                "jitsi bridge: очередь участника %s переполнена — пропущено %.0f с аудио "
+                "(декодер не успевает; запись не тронута)",
+                participant_id,
+                self._dropped_samples[participant_id] / SAMPLE_RATE,
+            )
+            self._dropped_samples[participant_id] = 0
+            self._drop_log_at[participant_id] = now
 
     def _participant_needs_turn(self, participant_id: str) -> bool:
         """True while the pool still has work for this participant."""
@@ -578,7 +660,7 @@ class MeetingSession:
                     participant.participant_id,
                 )
             participant.stream = None
-            self._drain_pending(participant.participant_id)
+            self._drain_pending(participant.participant_id, unlimited=True)
 
     def _pump_participants(self) -> None:
         for participant_id, participant in list(self._participants.items()):
@@ -589,9 +671,9 @@ class MeetingSession:
             with self._lock:
                 chunks = self._pending.get(participant_id, [])
                 self._pending[participant_id] = []
-            for chunk in chunks:
-                participant.tracker.feed(chunk)
+                self._pending_samples[participant_id] = 0
             if chunks:
+                participant.tracker.feed(chunks[0] if len(chunks) == 1 else np.concatenate(chunks))
                 participant.tracker.tick()
 
     def _check_idle(self) -> None:

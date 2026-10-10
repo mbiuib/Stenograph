@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { IconChevron } from "../components/Icons";
 import { Card, Chip, EmptyState, ErrorBanner, StatusBadge } from "../components/ui";
 import { fmtClock, fmtDateTime, plural } from "../format";
 import { useNow, usePolling } from "../hooks";
@@ -116,6 +117,7 @@ function MeetingCard({
   onStop: (meetingId: string) => void;
   stoppingId: string | null;
 }) {
+  const [open, setOpen] = useState(false);
   const elapsed = Math.max(0, now / 1000 - meeting.started_at);
   const silence = meeting.silence_sec ?? 0;
   const idleLimit = meeting.idle_stop_sec ?? 0;
@@ -179,6 +181,18 @@ function MeetingCard({
           {stopBusy ? "Останавливается…" : "Остановить запись"}
         </button>
       </div>
+      <button
+        type="button"
+        aria-label={open ? "Свернуть список спикеров" : "Показать список спикеров"}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-1.5 border-b border-edge/60 px-4 py-2 text-left text-xs text-muted hover:bg-surface2/40"
+      >
+        <span className={`shrink-0 rounded p-0.5 transition-transform ${open ? "rotate-90" : ""}`}>
+          <IconChevron className="size-4" />
+        </span>
+        {open ? "Свернуть спикеров" : `Показать спикеров (${meeting.participants.length})`}
+      </button>
+      {open && (
       <ul className="divide-y divide-edge/60">
         {meeting.participants.map((participant) => {
           const speaking = participant.last_frame_sec != null && participant.last_frame_sec < 2.5;
@@ -209,6 +223,7 @@ function MeetingCard({
           );
         })}
       </ul>
+      )}
     </Card>
   );
 }

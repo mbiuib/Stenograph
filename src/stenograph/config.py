@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # Jitsi captions: shorter windows than live — the caption lag equals the cap.
     bridge_batch_window_sec: float = 3.0
     bridge_batch_hold_sec: float = 0.4
+    # Jitsi bridge overload guards: per-round cap of audio fed to one
+    # participant's tracker (0 = unlimited) and the per-participant backlog
+    # cap (oldest frames are dropped past it; recordings stay intact).
+    bridge_drain_max_sec: float = 4.0
+    bridge_pending_max_sec: float = 120.0
     # MEETSCRIBE_JITSI_IDLE_STOP_SEC: finalize a Jitsi meeting automatically
     # after this many seconds without any speech (0 = disabled). Covers the
     # "everybody left, but a forgotten client keeps the room alive" case:

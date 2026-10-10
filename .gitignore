@@ -11,3 +11,5 @@ dist/
 build/
 *.egg-info/
 certs/
+loadtest/samples/
+loadtest/results/
