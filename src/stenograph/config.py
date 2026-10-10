@@ -71,7 +71,15 @@ class Settings(BaseSettings):
     # participant's tracker (0 = unlimited) and the per-participant backlog
     # cap (oldest frames are dropped past it; recordings stay intact).
     bridge_drain_max_sec: float = 4.0
-    bridge_pending_max_sec: float = 120.0
+    bridge_pending_max_sec: float = 30.0
+    # MEETSCRIBE_BRIDGE_TOTAL_PENDING_MAX_SEC: server-wide cap of queued audio
+    # across ALL bridge meetings (0 = no budget). A 1 Hz sweeper drops the
+    # oldest frames from the largest backlogs past it — this bounds the
+    # post-meeting drain on a saturated decoder to minutes.
+    bridge_total_pending_max_sec: float = 1200.0
+    # MEETSCRIBE_BRIDGE_FINALIZE_CONCURRENCY: how many meetings may drain
+    # their remaining backlog simultaneously when finalizing (0 = unlimited).
+    bridge_finalize_concurrency: int = 2
     # MEETSCRIBE_JITSI_IDLE_STOP_SEC: finalize a Jitsi meeting automatically
     # after this many seconds without any speech (0 = disabled). Covers the
     # "everybody left, but a forgotten client keeps the room alive" case:

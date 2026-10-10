@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -45,6 +46,18 @@ class BridgeManager:
         self._auto_reprocess = auto_reprocess
         self._sessions: dict[str, MeetingSession] = {}
         self._lock = threading.Lock()
+        limit = settings.bridge_finalize_concurrency
+        self._finalize_gate: threading.Semaphore | None = (
+            threading.Semaphore(limit) if limit > 0 else None
+        )
+        budget = settings.bridge_total_pending_max_sec
+        if budget > 0:  # надзор за общим бюджетом бэклога (демон, 1 Гц)
+            threading.Thread(
+                target=self._budget_loop,
+                args=(budget,),
+                name="stenograph-bridge-budget",
+                daemon=True,
+            ).start()
 
     def start(self, meeting_id: str) -> MeetingSession:
         """Start a session for a meeting connection (replacing a stale one)."""
@@ -60,6 +73,7 @@ class BridgeManager:
                 reprocess=self._reprocess,
                 auto_reprocess=self._auto_reprocess,
                 transcribe=self._settings.realtime_transcribe,
+                finalize_gate=self._finalize_gate,
             )
             self._sessions[meeting_id] = session
         if previous is not None:
@@ -125,3 +139,34 @@ class BridgeManager:
             sessions = list(self._sessions.values())
         meetings = [session.status() for session in sessions]
         return {"active": bool(meetings), "meetings": meetings}
+
+    def _budget_loop(self, budget_sec: float) -> None:
+        """Keep the total queued backlog within ``budget_sec`` (daemon, 1 Hz).
+
+        A saturated decoder drains its backlog after the meetings close; the
+        per-stream caps alone would still allow hours of queued audio across
+        hundreds of streams. The budget bounds that drain to minutes: realtime
+        captions lose the oldest frames, recordings stay intact.
+        """
+        while True:
+            time.sleep(1.0)
+            try:
+                self._enforce_budget(budget_sec)
+            except Exception:  # noqa: BLE001 — the sweeper must never die
+                log.exception("jitsi bridge: сбой надзора за бюджетом бэклога")
+
+    def _enforce_budget(self, budget_sec: float) -> float:
+        """One sweeper pass over the live sessions; returns dropped seconds."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        excess = sum(session.pending_seconds() for session in sessions) - budget_sec
+        if excess <= 0:
+            return 0.0
+        dropped = 0.0
+        for session in sorted(sessions, key=lambda item: item.pending_seconds(), reverse=True):
+            if excess <= 0:
+                break
+            removed = session.drop_backlog(excess)
+            dropped += removed
+            excess -= removed
+        return dropped

@@ -10,14 +10,18 @@ three guards that bound it.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from fakes import PositionTranscriber, speech_audio
+from stenograph.bridge.manager import BridgeManager
 from stenograph.bridge.session import MeetingSession
 from stenograph.config import Settings
+from stenograph.domain.models import JobStatus
 from stenograph.events import EventBus
 from stenograph.storage import JobRepository
 
@@ -129,3 +133,100 @@ def test_pending_backlog_is_capped_dropping_the_oldest(
     assert total <= int(1.0 * 16000), "очередь обязана держаться в пределах кэпа"
     assert queued and queued[-1] is newest, "самый свежий кадр не должен выпадать"
     assert "переполнена" in caplog.text, "о дропе бэклога нужно предупреждать"
+
+
+def test_default_backlog_guards_are_tight() -> None:
+    """Defaults pin the overload guards (fields, not .env values)."""
+    fields = Settings.model_fields
+    assert fields["bridge_pending_max_sec"].default == 30.0
+    assert fields["bridge_total_pending_max_sec"].default == 1200.0
+    assert fields["bridge_finalize_concurrency"].default == 2
+
+
+def test_drop_backlog_takes_the_oldest_and_the_biggest(
+    session_factory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The global-budget drop sleeps nothing off the small queue."""
+    session = session_factory()
+    small = _chunks(2)  # 0.4 s
+    big = _chunks(25)  # 5.0 s
+    _seed(session, "small", small)
+    _seed(session, "big", big)
+    with caplog.at_level(logging.WARNING, logger="stenograph.bridge.session"):
+        dropped = session.drop_backlog(2.0)
+
+    assert dropped == pytest.approx(2.0, abs=0.2)
+    assert session._pending_samples["big"] == 15 * 3200, "срезаны ровно 2 с из большого"
+    assert session._pending_samples["small"] == 2 * 3200, "маленький бэклог не тронут"
+    assert session._pending["big"][-1] is big[-1], "самый свежий кадр остаётся в очереди"
+    assert "общему бюджету" in caplog.text, "о срезании по бюджету нужно предупреждать"
+
+
+class FakeBacklog:
+    """Session double for the global-budget sweeper."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.taken: list[float] = []
+
+    def pending_seconds(self) -> float:
+        """Queued seconds as configured."""
+        return self.seconds
+
+    def drop_backlog(self, seconds: float) -> float:
+        """Record and consume a drop request."""
+        take = min(seconds, self.seconds)
+        self.seconds -= take
+        self.taken.append(round(take, 3))
+        return take
+
+
+def test_manager_budget_pass_trims_the_largest_first(tmp_path: Path) -> None:
+    """The sweeper takes the whole excess from the biggest backlog."""
+    settings = Settings(
+        data_dir=tmp_path,
+        bridge_total_pending_max_sec=0,  # надзор не поднимаем: проход гоняем вручную
+        bridge_finalize_concurrency=0,
+    )
+    settings.ensure_dirs()
+    manager = BridgeManager(
+        settings,
+        JobRepository(settings.db_path),
+        EventBus(),
+        transcriber_factory=lambda language: PositionTranscriber(),
+    )
+    big = FakeBacklog(6.0)
+    small = FakeBacklog(2.0)
+    manager._sessions = {"a": big, "b": small}  # type: ignore[assignment]
+    dropped = manager._enforce_budget(4.0)
+
+    assert dropped == pytest.approx(4.0)
+    assert big.taken == [4.0], "лишнее срезает самый большой бэклог"
+    assert small.taken == [], "маленький бэклог в пределах бюджета не трогают"
+    assert big.seconds == pytest.approx(2.0)
+
+
+def test_finalize_waits_for_the_gate(tmp_path: Path) -> None:
+    """A meeting holds its finalize until the shared gate frees up."""
+    gate = threading.Semaphore(1)
+    gate.acquire()  # кто-то другой сейчас финализируется
+    settings = Settings(data_dir=tmp_path, live_step_sec=0.4, live_max_window_sec=10.0)
+    settings.ensure_dirs()
+    session = MeetingSession(
+        "room-gate",
+        settings,
+        JobRepository(settings.db_path),
+        EventBus(),
+        lambda language: PositionTranscriber(),
+        finalize_gate=gate,
+    )
+    try:
+        session.request_stop("manual")
+        time.sleep(1.2)  # воркер вышел из цикла и упёрся в гейт
+        assert not session.finished, "финализация обязана ждать общий гейт"
+        assert session.job.status == JobStatus.RUNNING
+    finally:
+        gate.release()
+    assert session.wait_finished(timeout=10.0), "после релиза финализация доходит"
+    assert session.job.status == JobStatus.DONE
+    session.stop()

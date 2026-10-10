@@ -147,6 +147,7 @@ class MeetingSession:
         reprocess: Callable[[Job], Job | None] | None = None,
         auto_reprocess: bool = False,
         transcribe: bool = True,
+        finalize_gate: threading.Semaphore | None = None,
     ) -> None:
         self.meeting_id = meeting_id
         # Record-only meetings (MEETSCRIBE_REALTIME_TRANSCRIBE=false) save the
@@ -180,6 +181,7 @@ class MeetingSession:
         self._pool = pool  # shared live decode pool (None = tick in this thread)
         self._reprocess = reprocess  # quality re-pass chain after the meeting ends
         self._auto_reprocess = auto_reprocess
+        self._finalize_gate = finalize_gate  # общий семафор: не дренируем толпой
         self._bridge_cap = settings.bridge_batch_window_sec
         self._bridge_hold = settings.bridge_batch_hold_sec
         self._lock = threading.Lock()  # guards participants/pending/segments
@@ -188,6 +190,7 @@ class MeetingSession:
         self._pending_samples: dict[str, int] = {}  # queued audio samples per participant
         self._dropped_samples: dict[str, int] = {}  # dropped backlog, for throttled warnings
         self._drop_log_at: dict[str, float] = {}  # last drop warning per participant
+        self._budget_log_at = 0.0  # last global-budget drop warning for this meeting
         self._segments: list[Segment] = []
         self._out: queue.Queue[str] = queue.Queue()
         self._closed = threading.Event()
@@ -541,23 +544,13 @@ class MeetingSession:
         cap_sec = self._settings.bridge_pending_max_sec
         if cap_sec <= 0:
             return
-        queue = self._pending[participant_id]
         total = self._pending_samples.get(participant_id, 0)
         drop_target = total - int(cap_sec * SAMPLE_RATE)
         if drop_target <= 0:
             return
-        dropped = 0
-        split = 0
-        for index, chunk in enumerate(queue):
-            if dropped >= drop_target:
-                break
-            dropped += chunk.size
-            split = index + 1
-        del queue[:split]
-        self._pending_samples[participant_id] = total - dropped
-        self._dropped_samples[participant_id] = (
-            self._dropped_samples.get(participant_id, 0) + dropped
-        )
+        dropped = self._drop_oldest_locked(participant_id, drop_target)
+        if not dropped:
+            return
         now = time.monotonic()
         if now - self._drop_log_at.get(participant_id, 0.0) >= 10.0:
             log.warning(
@@ -568,6 +561,65 @@ class MeetingSession:
             )
             self._dropped_samples[participant_id] = 0
             self._drop_log_at[participant_id] = now
+
+    def _drop_oldest_locked(self, participant_id: str, target_samples: int) -> int:
+        """Drop up to ``target_samples`` oldest queued samples (lock held)."""
+        queue = self._pending.get(participant_id)
+        if not queue or target_samples <= 0:
+            return 0
+        dropped = 0
+        split = 0
+        for index, chunk in enumerate(queue):
+            if dropped >= target_samples:
+                break
+            dropped += chunk.size
+            split = index + 1
+        del queue[:split]
+        self._pending_samples[participant_id] = max(
+            0, self._pending_samples.get(participant_id, 0) - dropped
+        )
+        self._dropped_samples[participant_id] = (
+            self._dropped_samples.get(participant_id, 0) + dropped
+        )
+        return dropped
+
+    def pending_seconds(self) -> float:
+        """Queued-but-undecoded audio seconds across this meeting's streams."""
+        with self._lock:
+            return sum(self._pending_samples.values()) / SAMPLE_RATE
+
+    def drop_backlog(self, seconds: float) -> float:
+        """Drop the oldest queued audio across this meeting, biggest queue first.
+
+        Used by the manager's global budget sweeper; like the per-participant
+        cap it sacrifices realtime captions only — the recordings on disk keep
+        every frame and the quality pass restores them afterwards.
+        """
+        target = int(seconds * SAMPLE_RATE)
+        if target <= 0:
+            return 0.0
+        dropped = 0
+        with self._lock:
+            order = sorted(
+                self._pending_samples,
+                key=lambda pid: self._pending_samples.get(pid, 0),
+                reverse=True,
+            )
+            for participant_id in order:
+                if dropped >= target:
+                    break
+                dropped += self._drop_oldest_locked(participant_id, target - dropped)
+            if dropped:
+                now = time.monotonic()
+                if now - self._budget_log_at >= 10.0:
+                    log.warning(
+                        "jitsi bridge: встреча %s — пропущено %.0f с аудио по общему "
+                        "бюджету бэклога (декодер не успевает; запись не тронута)",
+                        self.meeting_id,
+                        dropped / SAMPLE_RATE,
+                    )
+                    self._budget_log_at = now
+        return dropped / SAMPLE_RATE
 
     def _participant_needs_turn(self, participant_id: str) -> bool:
         """True while the pool still has work for this participant."""
@@ -628,12 +680,19 @@ class MeetingSession:
                 self._pump_participants()
                 self._check_idle()
                 time.sleep(0.15)
-            self._detach_streams()
-            self._pump_participants()
-            for participant in list(self._participants.values()):
-                if participant.tracker is not None:
-                    participant.tracker.flush()
-            self._finish()
+            gate = self._finalize_gate
+            if gate is not None:  # декодер один — не финализируем толпой
+                gate.acquire()
+            try:
+                self._detach_streams()
+                self._pump_participants()
+                for participant in list(self._participants.values()):
+                    if participant.tracker is not None:
+                        participant.tracker.flush()
+                self._finish()
+            finally:
+                if gate is not None:
+                    gate.release()
         except Exception as exc:  # noqa: BLE001 — report and keep the app alive
             log.exception("jitsi bridge: сессия %s упала", self.meeting_id)
             self._fail(str(exc))
