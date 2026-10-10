@@ -351,6 +351,26 @@ Live-запись или Jitsi-встреча, новые тяжёлые зад�
 модели (в работе / простой N) виден рядом. После выгрузки модель загрузится
 при следующей надобности заново (whisper — секунды, `moss` — минуты).
 
+## Внешний ASR-сервис (экспериментально)
+
+`asr_service.py` — отдельный процесс, отдающий те же движки (whisper/moss)
+по OpenAI-совместимому API. Смысл: инференс в отдельном процессе не может
+заморозить API основного сервера (перегрузка раньше блокировала event loop
+на минуты). Запуск: `start_asr.bat` (или `python -m stenograph.asr_service`),
+порт — `MEETSCRIBE_ASR_PORT` (по умолчанию 9001). Модели грузятся лениво при
+первом запросе; выгрузка по простою — общая (`MEETSCRIBE_MODEL_IDLE_UNLOAD_SEC`).
+
+```bash
+curl -s http://127.0.0.1:9001/v1/models
+curl -s -F file=@запись.wav -F model=whisper -F language=ru \
+  http://127.0.0.1:9001/v1/audio/transcriptions          # {"text": "..."}
+curl -s -F file=@запись.wav -F model=moss -F response_format=verbose_json \
+  http://127.0.0.1:9001/v1/audio/transcriptions          # + segments/спикеры
+```
+
+Основной сервер пока работает со встроенными движками; переключение клиента
+на сервис (`MEETSCRIBE_ASR_BACKEND=remote`) — следующий шаг.
+
 ## Структура репозитория
 
 ```

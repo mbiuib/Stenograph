@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8000
+    # MEETSCRIBE_ASR_PORT: port of the external ASR service (asr_service.py,
+    # start_asr.bat) that serves whisper/moss in a separate process.
+    asr_port: int = 9001
     log_level: str = "INFO"
 
     ffmpeg: str = "ffmpeg"
