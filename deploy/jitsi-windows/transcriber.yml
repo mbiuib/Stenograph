@@ -10,6 +10,10 @@ services:
             - ${CONFIG}/transcriber:/config:Z
             - ${CONFIG}/storage/transcripts:/tmp/transcripts:z
             - ${CONFIG}/transcriber/custom-ca:/usr/local/share/ca-certificates:ro,z
+            # Jigasi's Jetty whisper client reads the JVM's default cacerts file
+            # (it ignores javax.net.ssl.trustStore), so the merged store (built by
+            # start.bat from custom-ca) is mounted over it.
+            - ${CONFIG}/transcriber/java-cacerts:/etc/ssl/certs/java/cacerts:ro
         environment:
             - AUTOSCALER_SIDECAR_KEY_FILE
             - AUTOSCALER_SIDECAR_KEY_ID

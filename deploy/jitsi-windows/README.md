@@ -53,7 +53,8 @@ Desktop.
 2. проверяет Docker Desktop и при необходимости запускает его;
 3. добавляет правила Windows Firewall для 8443/tcp, 8081/tcp, 10000/udp
    (без прав администратора шаг пропускается);
-4. выпускает сертификат от локального CA «Stenograph Local CA»;
+4. выпускает сертификат от локального CA «Stenograph Local CA» и собирает
+   JVM-хранилище доверия для transcriber (см. «Интеграция»);
 5. поднимает контейнеры и компенсирует известную гонку первого запуска:
    если jigasi обратился к prosody раньше создания своей учётной записи
    (`not-authorized` в логе), контейнер `transcriber` перезапускается
@@ -109,12 +110,25 @@ Jigasi работает в режиме транскрайбера и подкл
 «Стенографа» по WebSocket. Адрес задаётся в `.env`:
 
 ```ini
-JIGASI_TRANSCRIBER_WHISPER_URL=ws://host.docker.internal:8000/ws
+JIGASI_TRANSCRIBER_WHISPER_URL=wss://host.docker.internal/ws
 ```
 
-- `host.docker.internal` — обращение к хостовой машине (Docker Desktop).
-  Если «Стенограф» работает на другом сервере, укажите его адрес
-  (`ws://server:8000/ws`); сервер должен слушать `0.0.0.0:8000`.
+- По умолчанию «Стенограф» отдаёт HTTPS сам (нативный TLS, `:443`), поэтому
+  используется `wss://`. `host.docker.internal` — обращение к хостовой
+  машине (Docker Desktop). Если «Стенограф» работает на другом сервере,
+  укажите его адрес (`wss://server/ws`).
+- Сертификат сервера должен покрывать это имя/адрес (SAN). Пакетный
+  `scripts/make_cert.sh` уже добавляет `DNS:host.docker.internal` в SAN.
+- Чтобы Jigasi доверял сертификату, положите его `ca.crt` (PEM) рядом с
+  `start.bat` под именем **`stenograph-ca.crt`** — `start.bat` скопирует его в
+  `config\transcriber\custom-ca\` и **пересоберёт JVM-хранилище доверия**
+  (`config\transcriber\java-cacerts`), которое `transcriber.yml` монтирует
+  поверх системного. Это обязательный шаг: Jetty-клиент внутри jigasi читает
+  встроенное JVM-хранилище и игнорирует кастомные trust store (проверено
+  ssl-дебагом). При ручной правке: после замены файла в `custom-ca\` удалите
+  `config\transcriber\java-cacerts` и запустите `start.bat`.
+- Для сервера без TLS (старый режим, HTTP `:8000`) измените адрес на
+  `ws://host.docker.internal:8000/ws` — CA в этом случае не нужен.
 - Транскрипция включается в комнате модератором: **More actions →
   Closed captions → Start closed captions**. Jigasi заходит скрытым
   участником и передаёт аудио каждого говорящего; субтитры идут в Jitsi,
@@ -126,11 +140,11 @@ JIGASI_TRANSCRIBER_WHISPER_URL=ws://host.docker.internal:8000/ws
 ```bat
 docker ps                                              :: 5 контейнеров Up
 docker logs docker-jitsi-meet-transcriber-1 --tail 50
-docker exec docker-jitsi-meet-transcriber-1 wget -qO- http://host.docker.internal:8000/api/health
+docker exec docker-jitsi-meet-transcriber-1 sh -c ". /run/ca/env 2>/dev/null; wget -qO- https://host.docker.internal/api/health"
 ```
 
 Полный цикл проверен вживую: вход в комнату → включение CC → jigasi
-подключается (`WhisperWebsocket … Successfully connected to ws://…`) →
+подключается (`WhisperWebsocket … Successfully connected to wss://…`) →
 задача в «Стенографе» создаётся и закрывается после выхода участников.
 
 ## Диагностика
@@ -142,6 +156,7 @@ docker exec docker-jitsi-meet-transcriber-1 wget -qO- http://host.docker.interna
 | Предупреждение сертификата у пользователей | Раздать `ca.crt` + `install-ca.bat` либо использовать свой сертификат (см. выше) |
 | Порт занят | Поменять `HTTP_PORT`/`HTTPS_PORT` в `.env`, перезапустить `start.bat` |
 | Субтитры не идут | `docker logs docker-jitsi-meet-transcriber-1`; проверить `JIGASI_TRANSCRIBER_WHISPER_URL`; см. `docs/JITSI.md` |
+| В логе jigasi `PKIX path building failed` | Не собрано JVM-хранилище доверия: убедиться, что `stenograph-ca.crt` лежит рядом со `start.bat`, удалить `config\transcriber\java-cacerts` и запустить `start.bat` |
 | Логи | `docker compose -f docker-compose.yml -f transcriber.yml logs -f web jvb transcriber` |
 | Обновить образы | `docker compose -f docker-compose.yml -f transcriber.yml pull` + `up -d`. Зафиксировать версию: `JITSI_IMAGE_VERSION=stable-XXXX` в `.env` (по умолчанию `unstable`) |
 

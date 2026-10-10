@@ -67,6 +67,10 @@ mkdir "config\jicofo\custom-ca" 2>nul
 mkdir "config\jvb\custom-ca" 2>nul
 mkdir "config\transcriber\custom-ca" 2>nul
 mkdir "config\storage\transcripts" 2>nul
+if not exist "stenograph-ca.crt" goto :ca_done
+copy /Y "stenograph-ca.crt" "config\transcriber\custom-ca\stenograph-ca.crt" >nul
+echo       Custom CA for the transcription server picked up.
+:ca_done
 if exist "config\web\keys\cert.crt" goto :certs_done
 
 set "GITBASH="
@@ -94,6 +98,30 @@ goto :certs_done
 echo       WARNING: certificate generation failed; using Jitsi's built-in cert.
 
 :certs_done
+
+rem Build the transcriber's JVM trust file. jigasi's Jetty whisper client
+rem reads the JVM's default cacerts file and ignores custom trust stores, so
+rem a merged store (image cacerts + the custom CA, when present) is rebuilt
+rem here and mounted over the system file by transcriber.yml.
+if exist "config\transcriber\java-cacerts\" rmdir /s /q "config\transcriber\java-cacerts" 2>nul
+if exist "config\transcriber\java-cacerts" del /q "config\transcriber\java-cacerts" 2>nul
+set "JIGASI_IMG=ghcr.io/jitsi/jigasi:unstable"
+for /f "usebackq tokens=1,* delims==" %%a in (".env") do if "%%a"=="JITSI_IMAGE_VERSION" if not "%%b"=="" set "JIGASI_IMG=ghcr.io/jitsi/jigasi:%%b"
+if not exist "config\transcriber\custom-ca\stenograph-ca.crt" goto :jvmtrust_plain
+echo       Building the transcriber JVM trust file (custom CA) ...
+docker run --rm -u 0 --entrypoint sh -v "%CD%\config\transcriber:/cfg" -v "%CD%\config\transcriber\custom-ca:/ca:ro" "%JIGASI_IMG%" -c "cp /etc/ssl/certs/java/cacerts /cfg/java-cacerts && keytool -importcert -noprompt -storepass changeit -alias stenograph-ca -file /ca/stenograph-ca.crt -keystore /cfg/java-cacerts >/dev/null && echo       ok"
+goto :jvmtrust_done
+
+:jvmtrust_plain
+echo       Building the transcriber JVM trust file (no custom CA yet) ...
+docker run --rm -u 0 --entrypoint sh -v "%CD%\config\transcriber:/cfg" "%JIGASI_IMG%" -c "cp /etc/ssl/certs/java/cacerts /cfg/java-cacerts && echo       ok"
+
+:jvmtrust_done
+if not exist "config\transcriber\java-cacerts" (
+    echo       ERROR: could not build config\transcriber\java-cacerts
+    echo       (the transcriber mount needs this file; is Docker running?)
+    goto :fail
+)
 
 echo [5/6] Starting containers (the FIRST run downloads ~1.5 GB of images) ...
 docker compose -f docker-compose.yml -f transcriber.yml up -d

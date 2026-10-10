@@ -28,7 +28,8 @@ JITSI на ВМ <адрес-Jitsi>  (web + prosody + jicofo + jvb)
         ▼
 Jigasi (5-й контейнер, transcriber)
         │
-        │  WebSocket →  ws://<адрес-стенографа>:8000/ws/<сессия>
+        │  WebSocket →  wss://<адрес-стенографа>/ws/<сессия>   (сервер сам
+        │  терминирует TLS на :443 — отдельный прокси не нужен)
         │  туда: бинарные кадры = заголовок (id участника + язык) + PCM 16 кГц
         │  обратно: JSON {partial / final, participant_id, text}
         ▼
@@ -81,10 +82,49 @@ Jigasi (5-й контейнер, transcriber)
 ```bash
 ENABLE_TRANSCRIPTIONS=1
 JIGASI_TRANSCRIBER_CUSTOM_SERVICE=org.jitsi.jigasi.transcription.WhisperTranscriptionService
-JIGASI_TRANSCRIBER_WHISPER_URL=ws://<адрес-стенографа>:8000/ws
+JIGASI_TRANSCRIBER_WHISPER_URL=wss://<адрес-стенографа>/ws
 PREFERRED_LANGUAGE=ru-RU      # язык распознавания по умолчанию
 USE_APP_LANGUAGE=0            # не подменять языком интерфейса
 ```
+
+Сервер «Стенографа» отдаёт TLS сам (uvicorn, `:443`; прокси не нужен). Чтобы
+Jigasi доверял сертификату, положите его `ca.crt` (PEM) в каталог custom-ca
+контейнера — образ при старте сам собирает trust-store и для системных
+клиентов, и для Java (проверено: Jetty-клиент jigasi подключается к wss):
+
+```bash
+cp ca.crt ~/.jitsi-meet-cfg/transcriber/custom-ca/stenograph-ca.crt
+docker compose -f docker-compose.yml -f transcriber.yml up -d transcriber
+```
+
+Сертификат сервера должен покрывать адрес из URL (SAN): для
+`wss://192.168.0.9/ws` — `IP:192.168.0.9`; для доступа из контейнеров по
+`host.docker.internal` — одноимённое DNS-имя (`scripts/make_cert.sh` уже
+добавляет его в SAN).
+
+Отдельная особенность jigasi: его Jetty-клиент читает встроенное
+JVM-хранилище (`.../lib/security/cacerts`) и **игнорирует**
+`javax.net.ssl.trustStore` (проверено ssl-дебагом). Поэтому объединённое
+хранилище (штатные CA + ваш) собирается в файл и монтируется поверх
+системного; в `deploy/jitsi-windows` это делает `start.bat` автоматически:
+
+```yaml
+# transcriber.yml (фрагмент)
+volumes:
+    - ${CONFIG}/transcriber/java-cacerts:/etc/ssl/certs/java/cacerts:ro
+```
+
+```bash
+# разовая сборка вручную (например, на ВМ):
+docker run --rm -u 0 --entrypoint sh -v <CONFIG>/transcriber:/cfg \
+  -v <CONFIG>/transcriber/custom-ca:/ca:ro ghcr.io/jitsi/jigasi:unstable \
+  -c 'cp /etc/ssl/certs/java/cacerts /cfg/java-cacerts && \
+      keytool -importcert -noprompt -storepass changeit -alias ca \
+      -file /ca/stenograph-ca.crt -keystore /cfg/java-cacerts'
+```
+
+Файл `java-cacerts` должен существовать **до** старта контейнера: если его
+нет, Docker создаст на его месте каталог и mount упадёт.
 
 Запуск (профиль `transcriber.yml` добавляет пятый контейнер — Jigasi):
 
@@ -98,14 +138,14 @@ docker compose -f docker-compose.yml -f transcriber.yml up -d
 ```
 org.jitsi.jigasi.ENABLE_TRANSCRIPTION=true
 org.jitsi.jigasi.transcription.customService=org.jitsi.jigasi.transcription.WhisperTranscriptionService
-org.jitsi.jigasi.transcription.whisper.websocket_url=ws://<адрес-стенографа>:8000/ws
+org.jitsi.jigasi.transcription.whisper.websocket_url=wss://<адрес-стенографа>/ws
 ```
 
 ### Сторона «Стенографа» (Windows, `<адрес-стенографа>`)
 
-- Сервер должен слушать `0.0.0.0:8000` (`start_server.bat` уже так) — иначе
-  Jigasi с ВМ не достучится.
-- Эндпоинт моста: `WS /ws/{meeting_id}`.
+- Сервер запускается `start_server.bat`: при наличии сертификата — HTTPS
+  на `0.0.0.0:443` (без прокси), иначе HTTP на `:8000`.
+- Эндпоинт моста: `WSS /ws/{meeting_id}` (TLS — тот же порт, что и веб).
 
 ## Код
 
@@ -131,7 +171,14 @@ org.jitsi.jigasi.transcription.whisper.websocket_url=ws://<адрес-стено
 Если субтитры не идут:
 
 - нет «websocket подключён» → проверить `JIGASI_TRANSCRIBER_WHISPER_URL` и что
-  порт 8000 открыт (netstat/фаервол);
+  порт 443 открыт (netstat/фаервол);
+- в логе Jigasi `SSLHandshakeException ... certificate_unknown` → Jigasi не
+  доверяет сертификату: положить `ca.crt` в `custom-ca` и пересобрать
+  `java-cacerts` (см. «Конфигурация»); `PKIX path building failed` → то же
+  самое (JVM-хранилище не собрано/устарело);
+  `No subject alternative DNS name matching …` → в сертификате нет
+  имени/адреса из URL — перевыпустить `scripts/make_cert.sh` с нужным IP
+  и перезапустить сервер;
 - «подключён», но участников нет → пере-включить CC в конференции;
 - русская речь уходит в перевод на английский → проверить
   `PREFERRED_LANGUAGE=ru-RU`, `USE_APP_LANGUAGE=0` и перезапустить контейнер
@@ -158,6 +205,11 @@ READY), jigasi ходит на `ws://host.docker.internal:8000/ws`. Полная
 инструкция и траблшутинг — `deploy/jitsi-windows/README.md`.
 Проверено вживую (10.10.2026): комната → CC → задача «Jitsi — …» в вебе
 → done.
+
+- (10.10.2026) Мост переведён на TLS: сервер «Стенографа» отдаёт HTTPS сам
+  (uvicorn, `:443`, без Caddy); доверие Jigasi проверено java-пробой с
+  `-Djavax.net.ssl.trustStore` из `/run/ca` и живой комнатой:
+  `wss://host.docker.internal/ws` и `wss://<ip>/ws` подключаются.
 
 ## Как объяснить руководителю (в двух предложениях)
 

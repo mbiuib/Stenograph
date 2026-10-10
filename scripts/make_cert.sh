@@ -14,12 +14,20 @@ IP="${1:-192.168.0.9}"
 HOST="${2:-}"
 CA_DIR="${STENOGRAPH_CA_DIR:-$HOME/stenograph-ca}"
 
-SAN="IP:${IP},IP:127.0.0.1,DNS:localhost,DNS:stenograph.local"
+# Нативный OpenSSL из Git for Windows не понимает POSIX-пути (/c/...):
+# конвертируем в смешанный вид C:/... (на Linux cygpath отсутствует — no-op).
+if command -v cygpath >/dev/null 2>&1; then
+  CA_DIR="$(cygpath -m "$CA_DIR")"
+fi
+
+SAN="IP:${IP},IP:127.0.0.1,DNS:localhost,DNS:stenograph.local,DNS:host.docker.internal"
 if [ -n "$HOST" ]; then
   SAN="$SAN,DNS:$HOST"
 fi
 
-EXT="$(mktemp)"
+# ext-файл держим рядом с CWD относительным путём: OpenSSL из Git for Windows
+# не умеет читать MSYS-пути вида /tmp/... (вывод mktemp).
+EXT=".cert-ext.$$"
 trap 'rm -f "$EXT"' EXIT
 printf 'subjectAltName=%s\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' "$SAN" > "$EXT"
 
@@ -31,4 +39,4 @@ openssl x509 -req -in certs/stenograph.csr -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/
 rm -f certs/stenograph.csr
 
 echo "готово: certs/stenograph.crt (SAN: $SAN)"
-echo "подхватить без перезапуска приложения: caddy reload (в папке проекта)"
+echo "перезапусти сервер (start_server.bat), чтобы он подхватил новый сертификат"
