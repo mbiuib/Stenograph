@@ -142,6 +142,9 @@ export interface JitsiParticipant {
 
 export interface JitsiMeeting {
   meeting_id: string;
+  /** Decoded, human-readable room name (also embedded in the job name). */
+  room: string;
+  source_name: string;
   job_id: string;
   job_status: string;
   started_at: number;
@@ -207,6 +210,7 @@ export interface MetricsSnapshot {
   };
   models: ModelMemory[];
   live: LiveStatus;
+  bridge: JitsiStatus | null;
   queue: QueueSnapshot;
   jobs: Record<string, number>;
   llm: { lm_studio: boolean };

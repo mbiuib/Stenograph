@@ -93,6 +93,7 @@ def test_snapshot_shape(monkeypatch: Any) -> None:
 
     snap = metrics.snapshot(
         live={"active": False, "sessions": []},
+        bridge={"active": False, "meetings": []},
         queue={"active": None, "waiting": []},
         counts={"done": 3},
     )
@@ -101,6 +102,7 @@ def test_snapshot_shape(monkeypatch: Any) -> None:
     assert snap["system"]["self_process"]["rss_mb"] == 300.0
     assert snap["system"]["gpu_processes"][0]["vram_mb"] == 2500
     assert snap["live"] == {"active": False, "sessions": []}
+    assert snap["bridge"] == {"active": False, "meetings": []}
     assert snap["queue"] == {"active": None, "waiting": []}
     assert snap["jobs"] == {"done": 3}
     assert snap["llm"] == {"lm_studio": False}
@@ -130,3 +132,6 @@ def test_metrics_endpoint(tmp_path: Path, monkeypatch: Any) -> None:
     assert body["system"]["self_process"]["pid"] > 0
     assert isinstance(body["models"], list)
     assert "live" in body and "queue" in body and "jobs" in body
+    # The bridge lane must come from the Jitsi manager, not a null default.
+    assert isinstance(body["bridge"], dict)
+    assert body["bridge"]["active"] is False and body["bridge"]["meetings"] == []

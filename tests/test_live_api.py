@@ -115,13 +115,15 @@ def test_live_session_end_to_end(tmp_path: Path) -> None:
 
 
 def test_live_start_accepts_meeting_title(tmp_path: Path) -> None:
-    """A custom title names the session; the default carries a date/time."""
+    """The title goes last; the «Live (машина)» prefix always comes first."""
     service, live, _bus = _make_stack(tmp_path)
     client = TestClient(create_app(settings=service.settings, service=service, live=live))
 
     titled = client.post("/api/live/start", data={"tracks": "system", "title": "Планёрка"})
     assert titled.status_code == 201
-    assert titled.json()["source_name"] == "Планёрка"
+    name = titled.json()["source_name"]
+    assert name.startswith("Live (машина) — ")
+    assert name.endswith(" — Планёрка")
     assert client.post("/api/live/stop").status_code == 200
 
     default = client.post("/api/live/start", data={"tracks": "system"})

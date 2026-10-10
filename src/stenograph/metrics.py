@@ -285,6 +285,7 @@ def touch_engine(engine: object) -> None:
 def snapshot(
     *,
     live: dict | None = None,
+    bridge: dict | None = None,
     queue: dict | None = None,
     counts: dict | None = None,
 ) -> dict:
@@ -320,6 +321,7 @@ def snapshot(
         },
         "models": models,
         "live": live,
+        "bridge": bridge,
         "queue": queue,
         "jobs": counts,
         "llm": llm_status(),

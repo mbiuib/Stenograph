@@ -401,6 +401,7 @@ def create_app(
         view = service.queue_view()
         return metrics.snapshot(
             live=live.status(),
+            bridge=bridge.status(),
             queue={
                 "active": view["active"].model_dump() if view["active"] else None,
                 "waiting": [job.model_dump() for job in view["waiting"]],
@@ -467,7 +468,11 @@ def create_app(
         """Browser live capture: the page uploads microphone/system audio.
 
         Handshake (text JSON): ``{"type":"start","tracks":["mic","system"],
-        "language":"ru","title":"Планёрка"}``; the answer is
+        "language":"ru","title":"Планёрка","client":{…},"capture_devices":{…}}``;
+        ``client`` carries the page's device info (user agent, platform,
+        screen — see clientinfo.py) and ``capture_devices`` the audio device
+        labels; both land in the job metadata, the short device tag goes into
+        the job name. The answer is
         ``{"type":"ready","job_id":…}``.
         Binary frames: one track byte (0 = mic, 1 = system) + int16 LE
         16 kHz mono PCM. Any number of browser sessions can run at once; the
@@ -489,11 +494,22 @@ def create_app(
             if command.get("type") != "start":
                 raise RuntimeError("первым сообщением должен быть start")
             requested = [name for name in command.get("tracks") or [] if name in ("mic", "system")]
+            client = command.get("client")
+            client = dict(client) if isinstance(client, dict) else None
+            if client is not None:
+                if websocket.client is not None:
+                    client.setdefault("ip", websocket.client.host)
+                host = websocket.headers.get("host")
+                if host:
+                    client.setdefault("server", host)
+            devices = command.get("capture_devices")
             session = live.start_web(
                 requested or None,
                 command.get("language") or None,
                 command.get("title") or None,
                 transcribe=command.get("transcribe"),
+                client=client,
+                capture_devices=dict(devices) if isinstance(devices, dict) else None,
             )
             log.info(
                 "live: браузерная сессия %s подключена (%s)",

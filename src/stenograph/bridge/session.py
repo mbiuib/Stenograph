@@ -24,7 +24,7 @@ from ..config import Settings
 from ..domain.models import Job, JobStatus, Segment
 from ..events import EventBus
 from ..live.streamer import SAMPLE_RATE, StreamTracker
-from ..naming import timestamped
+from ..naming import jitsi_name, room_label
 from ..storage import JobRepository
 from .protocol import normalize_language, result_message
 
@@ -159,13 +159,14 @@ class MeetingSession:
         self._language = normalize_language(settings.bridge_language or "")
         self.job = Job(
             kind="jitsi",
-            source_name=timestamped("Jitsi"),
+            source_name=jitsi_name(room=meeting_id),
             status=JobStatus.RUNNING,
             started_at=time.time(),
             language=self._language,
         )
         self.job.meta["engine"] = f"whisper:{settings.live_model}"
         self.job.meta["meeting_id"] = meeting_id
+        self.job.meta["room"] = room_label(meeting_id)
         self.job.meta["transcribe"] = transcribe
         # Дорожки пишутся по часам встречи (паузы между репликами — тишиной):
         # файлы участников выровнены и микшируются в одну запись «как вживую».
@@ -225,6 +226,8 @@ class MeetingSession:
                 )
             return {
                 "meeting_id": self.meeting_id,
+                "room": room_label(self.meeting_id),
+                "source_name": self.job.source_name,
                 "job_id": self.job.id,
                 "job_status": self.job.status.value,
                 "started_at": self.job.started_at,

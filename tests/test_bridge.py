@@ -125,6 +125,9 @@ def test_bridge_streams_captions_and_persists(tmp_path: Path) -> None:
     assert jobs, "job не создан"
     job = jobs[0]
     assert job.status == "done", job.error
+    assert job.source_name.startswith("Jitsi — ")
+    assert job.source_name.endswith(" — room-1")
+    assert job.meta["room"] == "room-1"
     assert job.segments
     assert any("фраза" in segment.text for segment in job.segments)
     assert job.text.startswith("Спикер 1: ")

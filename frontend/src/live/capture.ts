@@ -101,6 +101,41 @@ function describeMediaError(err: unknown): string {
   }
 }
 
+/** The page's device report for the server (job metadata + name tag). */
+function clientInfo(): Record<string, unknown> {
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return {
+    user_agent: navigator.userAgent,
+    platform: nav.userAgentData?.platform || navigator.platform || "",
+    language: navigator.language,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    screen: `${window.screen.width}x${window.screen.height}`,
+    pixel_ratio: window.devicePixelRatio,
+  };
+}
+
+/** Human labels of the captured audio sources (mic name, shared surface). */
+function captureDeviceLabels(streams: Map<LiveTrack, MediaStream>): Record<string, string> {
+  const labels: Record<string, string> = {};
+  const mic = streams.get("mic")?.getAudioTracks()[0];
+  if (mic?.label) labels.mic = mic.label;
+  const display = streams.get("system");
+  const audio = display?.getAudioTracks()[0];
+  const video = display?.getVideoTracks()[0];
+  const settings = video?.getSettings() as { displaySurface?: string } | undefined;
+  const surfaceLabel =
+    settings?.displaySurface === "monitor"
+      ? "весь экран"
+      : settings?.displaySurface === "window"
+        ? "окно"
+        : settings?.displaySurface === "browser"
+          ? "вкладка"
+          : undefined;
+  const system = audio?.label && audio.label !== "…" ? audio.label : surfaceLabel;
+  if (system) labels.system = system;
+  return labels;
+}
+
 export async function startLiveCapture(options: LiveCaptureOptions): Promise<LiveCapture> {
   if (!options.tracks.length) throw new Error("Выберите хотя бы один источник");
   if (!window.isSecureContext) {
@@ -199,6 +234,8 @@ export async function startLiveCapture(options: LiveCaptureOptions): Promise<Liv
             language: options.language || undefined,
             title: options.title || undefined,
             transcribe: options.transcribe ?? undefined,
+            client: clientInfo(),
+            capture_devices: captureDeviceLabels(streamByTrack),
           }),
         );
       };

@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatCard } from "../components/ui";
+import { plural } from "../format";
 import { usePolling } from "../hooks";
 
 function fmtMb(mb: number | null | undefined): string {
@@ -24,7 +25,9 @@ export function MonitorPage() {
   const processes = data?.system.gpu_processes ?? [];
   const models = data?.models ?? [];
   const live = data?.live ?? null;
+  const bridge = data?.bridge ?? null;
   const queue = data?.queue ?? null;
+  const airCount = (live?.sessions.length ?? 0) + (bridge?.meetings.length ?? 0);
 
   const vramPct = gpu ? Math.round((gpu.vram_used_mb / gpu.vram_total_mb) * 100) : 0;
 
@@ -47,7 +50,7 @@ export function MonitorPage() {
           hint={gpu ? `из ${fmtMb(gpu.vram_total_mb)}` : undefined}
         />
         <StatCard label="Моделей в памяти" value={models.length} />
-        <StatCard label="Эфир" value={live ? live.sessions.length : "—"} hint="сессий" />
+        <StatCard label="Эфир" value={data ? airCount : "—"} hint="сессий" />
         <StatCard label="RAM сервера" value={self ? fmtMb(self.rss_mb) : "—"} />
         <StatCard label="CPU сервера" value={self?.cpu_pct != null ? `${self.cpu_pct}%` : "—"} />
       </div>
@@ -133,10 +136,10 @@ export function MonitorPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title={`Эфир (${live?.sessions.length ?? 0})`}>
-          {live && live.sessions.length > 0 ? (
+        <Card title={`Эфир (${airCount})`}>
+          {airCount > 0 ? (
             <ul className="flex flex-col gap-3">
-              {live.sessions.map((session) => (
+              {live?.sessions.map((session) => (
                 <li key={session.job_id} className="flex flex-col gap-1">
                   <div className="flex items-center justify-between gap-3">
                     <Link
@@ -162,6 +165,34 @@ export function MonitorPage() {
                     {!session.transcribing && session.queue_position != null && (
                       <Chip>в очереди: {session.queue_position}</Chip>
                     )}
+                  </div>
+                </li>
+              ))}
+              {bridge?.meetings.map((meeting) => (
+                <li key={meeting.job_id} className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <Link
+                      to={`/jobs/${meeting.job_id}`}
+                      className="min-w-0 truncate text-sm font-medium hover:text-accent"
+                    >
+                      {meeting.source_name}
+                    </Link>
+                    <span className="tabular shrink-0 text-xs text-muted">
+                      идёт {fmtIdle(meeting.duration_sec)}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Chip>Jitsi</Chip>
+                    <Chip>
+                      {meeting.participants.length}{" "}
+                      {plural(meeting.participants.length, "участник", "участника", "участников")}
+                    </Chip>
+                    {meeting.transcribe ? (
+                      <Chip className="text-accent">распознавание</Chip>
+                    ) : (
+                      <Chip>без распознавания</Chip>
+                    )}
+                    {meeting.stopping && <Chip className="text-err">останавливается</Chip>}
                   </div>
                 </li>
               ))}

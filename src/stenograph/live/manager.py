@@ -18,6 +18,7 @@ the recording later.
 from __future__ import annotations
 
 import logging
+import platform
 import threading
 import time
 import wave
@@ -27,10 +28,11 @@ from typing import Any
 
 import numpy as np
 
+from ..clientinfo import short_device_tag
 from ..config import Settings
 from ..domain.models import Job, JobStatus, Segment
 from ..events import EventBus
-from ..naming import timestamped
+from ..naming import live_name
 from ..storage import JobRepository
 from . import capture as capture_module
 from .streamer import (
@@ -262,10 +264,11 @@ class LiveManager:
             tracks,
             language,
             capture_factory=self._capture_factory,
-            source_name=(title or "").strip() or timestamped("Live (машина)"),
+            source_name=live_name(prefix="Live (машина)", title=title),
             capture_mode=None,
             server=True,
             transcribe=transcribe,
+            client={"kind": "server", "host": platform.node()},
         )
         return session.job
 
@@ -275,20 +278,27 @@ class LiveManager:
         language: str | None = None,
         title: str | None = None,
         transcribe: bool | None = None,
+        client: dict | None = None,
+        capture_devices: dict | None = None,
     ) -> _LiveSession:
         """Start a browser-upload session; audio arrives via ``session.feed``.
 
         Any number of browser sessions can run at once; the decode queue
         transcribes them turn by turn (unless the session is record-only).
+        ``client`` is the page's device report (user agent, platform, ip from
+        the websocket — see clientinfo.py): it lands in the metadata and its
+        short tag («Chrome · Windows») goes into the job name.
         """
         return self._begin(
             tracks,
             language,
             capture_factory=None,
-            source_name=(title or "").strip() or timestamped("Live"),
+            source_name=live_name(device=short_device_tag(client), title=title),
             capture_mode="browser",
             server=False,
             transcribe=transcribe,
+            client=client,
+            capture_devices=capture_devices,
         )
 
     def stop(self) -> Job | None:
@@ -335,11 +345,15 @@ class LiveManager:
         capture_mode: str | None,
         server: bool,
         transcribe: bool | None = None,
+        client: dict | None = None,
+        capture_devices: dict | None = None,
     ) -> _LiveSession:
         """Create and start a session (shared by server-side and browser capture).
 
         ``transcribe`` overrides MEETSCRIBE_REALTIME_TRANSCRIBE for this
         session: False = record-only (the quality pass decodes afterwards).
+        ``client``/``capture_devices`` are stored in the job metadata when
+        given (browser device report and audio device labels).
         """
         decoding = self._settings.realtime_transcribe if transcribe is None else transcribe
         selected = tuple(track for track in (tracks or DEFAULT_TRACKS) if track)
@@ -366,6 +380,10 @@ class LiveManager:
                     job.meta["devices"] = capture_module.describe_devices()
                 except Exception:  # noqa: BLE001 — device info is best-effort metadata
                     log.debug("не удалось получить имена устройств", exc_info=True)
+            if client:
+                job.meta["client"] = dict(client)
+            if capture_devices:
+                job.meta["capture_devices"] = dict(capture_devices)
             self._repo.save(job)
             session = _LiveSession(
                 job=job,

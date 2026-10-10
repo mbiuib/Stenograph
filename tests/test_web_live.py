@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from time import monotonic, sleep
@@ -92,7 +93,7 @@ def _wait_until(condition, timeout: float = 15.0, pause: float = 0.1) -> bool:
 
 
 def test_web_live_ws_title_names_the_job(tmp_path: Path) -> None:
-    """The start-frame title becomes the session name; the default is timestamped."""
+    """The title goes last; the type prefix (and device tag) always come first."""
     service, live, _bus = _make_stack(tmp_path)
     client = TestClient(create_app(settings=service.settings, service=service, live=live))
 
@@ -101,13 +102,49 @@ def test_web_live_ws_title_names_the_job(tmp_path: Path) -> None:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         titled_job = service.get(ready["job_id"])
-        assert titled_job is not None and titled_job.source_name == "Созвон команды"
+        assert titled_job is not None
+        assert titled_job.source_name.startswith("Live — ")
+        assert titled_job.source_name.endswith(" — Созвон команды")
 
     with client.websocket_connect("/ws/live") as ws:
         ws.send_json({"type": "start", "tracks": ["mic"]})
         ready = ws.receive_json()
         default_job = service.get(ready["job_id"])
         assert default_job is not None and default_job.source_name.startswith("Live — ")
+
+
+def test_web_live_ws_client_device_info(tmp_path: Path) -> None:
+    """The start-frame device report lands in the metadata and the job name."""
+    service, live, _bus = _make_stack(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service, live=live))
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    )
+
+    with client.websocket_connect("/ws/live") as ws:
+        ws.send_json(
+            {
+                "type": "start",
+                "tracks": ["mic"],
+                "title": "Планёрка",
+                "client": {"user_agent": user_agent, "platform": "Win32", "language": "ru-RU"},
+                "capture_devices": {"mic": "Микрофон (USB Audio)"},
+            }
+        )
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        job = service.get(ready["job_id"])
+
+    assert job is not None
+    assert re.fullmatch(
+        r"Live — Chrome 141 · Windows — \d{1,2} [а-я]{3}, \d{2}:\d{2} — Планёрка",
+        job.source_name,
+    ), job.source_name
+    assert job.meta["client"]["user_agent"] == user_agent
+    assert job.meta["client"]["language"] == "ru-RU"
+    assert job.meta["client"]["ip"]  # stamped from the websocket
+    assert job.meta["capture_devices"] == {"mic": "Микрофон (USB Audio)"}
 
 
 def test_web_live_upload_end_to_end(tmp_path: Path) -> None:
