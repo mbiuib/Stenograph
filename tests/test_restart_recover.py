@@ -66,7 +66,8 @@ def test_recover_puts_waiting_jobs_back(tmp_path: Path) -> None:
     service, repo, _ = _make_service(tmp_path)
     job = _seed_file_job(tmp_path)
     repo.save(job)
-    assert service.queue_view() == {"active": None, "waiting": []}
+    view = service.queue_view()
+    assert view["active"] is None and view["active_jobs"] == [] and view["waiting"] == []
 
     stats = service.recover_after_restart()
 
@@ -112,7 +113,7 @@ def test_recover_marks_interrupted_recording(tmp_path: Path) -> None:
     assert stored.message == INTERRUPTED_MESSAGE
     assert [segment.text for segment in stored.segments] == ["привет"]
     view = service.queue_view()
-    assert view["active"] is None and view["waiting"] == []
+    assert view["active"] is None and view["active_jobs"] == [] and view["waiting"] == []
 
 
 def test_recover_disabled_only_marks(tmp_path: Path) -> None:
@@ -134,7 +135,7 @@ def test_recover_disabled_only_marks(tmp_path: Path) -> None:
     time.sleep(0.3)
     assert engine.calls == []  # nothing was put on the queue
     view = service.queue_view()
-    assert view["active"] is None and view["waiting"] == []
+    assert view["active"] is None and view["active_jobs"] == [] and view["waiting"] == []
 
 
 def test_app_startup_recovers_the_queue(tmp_path: Path) -> None:

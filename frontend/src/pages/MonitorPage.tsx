@@ -204,20 +204,23 @@ export function MonitorPage() {
 
         <Card title="Очередь и внешние сервисы">
           <div className="flex flex-col gap-3">
-            {queue?.active ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between gap-3">
-                  <Link
-                    to={`/jobs/${queue.active.id}`}
-                    className="truncate text-sm font-medium hover:text-accent"
-                  >
-                    {queue.active.source_name}
-                  </Link>
-                  <span className="shrink-0 text-xs text-muted">в работе</span>
+            {(queue?.active_jobs?.length ? queue.active_jobs : queue?.active ? [queue.active] : []).map(
+              (job) => (
+                <div key={job.id} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <Link
+                      to={`/jobs/${job.id}`}
+                      className="truncate text-sm font-medium hover:text-accent"
+                    >
+                      {job.source_name}
+                    </Link>
+                    <span className="shrink-0 text-xs text-muted">в работе</span>
+                  </div>
+                  <ProgressBar value={job.progress} />
                 </div>
-                <ProgressBar value={queue.active.progress} />
-              </div>
-            ) : (
+              ),
+            )}
+            {!(queue?.active_jobs?.length || queue?.active) && (
               <p className="text-sm text-muted">Воркер свободен.</p>
             )}
             <div className="flex items-center justify-between text-sm">

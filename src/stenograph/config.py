@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # interrupted ones restart from scratch in the same job. False: orphans
     # are only marked "interrupted by a server stop" (retry manually).
     restart_recover: bool = True
+    # MEETSCRIBE_FILE_WORKERS: how many file/reprocess jobs may run in
+    # parallel (1 = serial, the default). Each worker loads its own copy of
+    # the model it needs — GPU/CPU memory multiplies by the count. While a
+    # live/Jitsi stream decodes, every worker holds heavy ASR back.
+    file_workers: int = 1
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

@@ -73,16 +73,33 @@ class TranscriptionService:
         # Set by create_app: does a live/bridge stream run right now? Heavy ASR
         # jobs then hold back until the air is free (realtime prioritisation).
         self.realtime_provider: Callable[[], bool] | None = None
-        self._engines: dict[str, AsrEngine] = {}  # created lazily on the worker thread
+        # MEETSCRIBE_FILE_WORKERS parallel workers run file/reprocess jobs when
+        # the air is free. Each worker keeps its OWN engine instances (a model
+        # is loaded per worker — memory multiplies by the count), so caches
+        # are never shared across threads. 1 (default) = the old serial mode.
+        self._workers = max(1, min(8, int(settings.file_workers or 1)))
+        self._engines: list[dict[str, AsrEngine]] = [{} for _ in range(self._workers)]
         self._queue: queue.Queue[str] = queue.Queue()
         self._waiting: list[str] = []
-        self._active_job_id: str | None = None
+        self._active_ids: list[str] = []  # running jobs, oldest first
         self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
-        self._worker = threading.Thread(
-            target=self._work_loop, name="stenograph-worker", daemon=True
-        )
-        self._worker.start()
+        self._threads = [
+            threading.Thread(
+                target=self._work_loop,
+                args=(slot,),
+                name=f"stenograph-worker-{slot + 1}",
+                daemon=True,
+            )
+            for slot in range(self._workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    @property
+    def workers(self) -> int:
+        """Effective number of parallel file/reprocess workers."""
+        return self._workers
 
     def submit_file(
         self,
@@ -293,7 +310,7 @@ class TranscriptionService:
         self._queue.put(job_id)
 
     def _enqueue(self, job: Job) -> Job:
-        """Persist a job and put it on the single-worker queue."""
+        """Persist a job and put it on the in-memory file queue."""
         self.repo.save(job)
         self._queue_up(job.id)
         log.info("queued job %s (%s)", job.id, job.source_name)
@@ -323,16 +340,22 @@ class TranscriptionService:
         self.repo.delete(job_id)
 
     def queue_view(self) -> dict:
-        """Snapshot of the work queue: the active job and the waiting ones."""
+        """Snapshot of the work queue: running jobs and the waiting ones.
+
+        ``active`` keeps pointing at the oldest running job (single-row
+        consumers), while ``active_jobs`` lists them all — parallel workers
+        may run several at once.
+        """
         with self._lock:
-            active_id = self._active_job_id
+            active_ids = list(self._active_ids)
             waiting_ids = list(self._waiting)
-        active = self.repo.get(active_id) if active_id else None
+        active_jobs = [job for job in (self.repo.get(item) for item in active_ids) if job]
+        active = active_jobs[0] if active_jobs else None
         waiting = sorted(
             (job for job in (self.repo.get(item) for item in waiting_ids) if job),
             key=queue_priority,  # display order == execution order
         )
-        return {"active": active, "waiting": waiting}
+        return {"active": active, "active_jobs": active_jobs, "waiting": waiting}
 
     def recover_after_restart(self) -> dict[str, int]:
         """Bring back jobs orphaned by a previous process (queue is in memory).
@@ -436,61 +459,78 @@ class TranscriptionService:
 
         return gate
 
-    def _work_loop(self) -> None:
+    def _work_loop(self, slot: int) -> None:
         while True:
             self._queue.get()  # wake-up: at least one job is waiting
             try:
-                self._serve_waiting()
+                self._serve_waiting(slot)
             except Exception:  # the worker must survive anything a job throws
-                log.exception("worker failed while serving the queue")
+                log.exception("worker %d failed while serving the queue", slot + 1)
             finally:
                 self._queue.task_done()
 
-    def _serve_waiting(self) -> None:
+    def _serve_waiting(self, slot: int) -> None:
         """Run the best-class waiting job; heavy ASR yields to the air."""
         while True:
-            job_id = self._pick_queued()
+            job_id = self._peek_queued()
             if job_id is None:
                 return
             if self._wait_for_realtime_gap(job_id):
-                # Held back by the air: return to the pool and re-pick a
-                # second later — a newly queued file takes the lead meanwhile.
-                with self._lock:
-                    self._waiting.insert(0, job_id)
+                # Held back by the air: the job STAYS in the pool (every
+                # worker keeps seeing the whole queue) — re-check next second.
                 time.sleep(1.0)
                 continue
-            self._run_job(job_id)
+            if not self._claim_queued(job_id):
+                continue  # another worker took it first — pick again
+            self._run_job(job_id, slot)
             return
 
-    def _pick_queued(self) -> str | None:
-        """Take the highest-class waiting job (insertion order breaks ties)."""
+    def _peek_queued(self) -> str | None:
+        """The best waiting job WITHOUT claiming it (stale rows are pruned).
+
+        Peeking never consumes the job: while the realtime gate holds it, it
+        must stay visible in the waiting pool for the queue view and for the
+        other workers (claiming comes separately, right before a run).
+        """
         with self._lock:
-            candidates = list(self._waiting)
-        best_id: str | None = None
-        best_rank = 0
-        for job_id in candidates:
+            best_id: str | None = None
+            best_rank = 0
+            stale: list[str] = []
+            for job_id in self._waiting:
+                job = self.repo.get(job_id)
+                if job is None or job.status != JobStatus.QUEUED:
+                    stale.append(job_id)
+                    continue
+                rank = queue_priority(job)
+                if best_id is None or rank < best_rank:
+                    best_id, best_rank = job_id, rank
+            for job_id in stale:
+                self._waiting.remove(job_id)
+            return best_id
+
+    def _claim_queued(self, job_id: str) -> bool:
+        """Atomically take ``job_id`` out of the waiting pool (False if gone).
+
+        The membership check and the removal share one lock, so parallel
+        workers can never run the same job twice.
+        """
+        with self._lock:
+            if job_id not in self._waiting:
+                return False
             job = self.repo.get(job_id)
             if job is None or job.status != JobStatus.QUEUED:
-                with self._lock:
-                    if job_id in self._waiting:
-                        self._waiting.remove(job_id)
-                continue
-            rank = queue_priority(job)
-            if best_id is None or rank < best_rank:
-                best_id, best_rank = job_id, rank
-        if best_id is None:
-            return None
-        with self._lock:
-            if best_id in self._waiting:
-                self._waiting.remove(best_id)
-        return best_id
+                self._waiting.remove(job_id)
+                return False
+            self._waiting.remove(job_id)
+            return True
 
-    def _run_job(self, job_id: str) -> None:
+    def _run_job(self, job_id: str, slot: int) -> None:
         job = self.repo.get(job_id)
         with self._lock:
             if job_id in self._waiting:
                 self._waiting.remove(job_id)
-            self._active_job_id = job_id
+            if job_id not in self._active_ids:
+                self._active_ids.append(job_id)
         try:
             if job is None:
                 log.warning("job %s disappeared before execution", job_id)
@@ -511,7 +551,7 @@ class TranscriptionService:
                 return
 
             request = job.meta.get("request") or {}
-            engine = self._engine_for(request.get("engine") or self.engine_name)
+            engine = self._engine_for(request.get("engine") or self.engine_name, slot)
             language = clean_language(request.get("language")) or self.settings.language_or_none()
             options = TranscribeOptions(language=language)
 
@@ -529,18 +569,24 @@ class TranscriptionService:
         finally:
             with self._lock:
                 self._cancel_events.pop(job_id, None)
-                self._active_job_id = None
+                if job_id in self._active_ids:
+                    self._active_ids.remove(job_id)
 
-    def _engine_for(self, name: str) -> AsrEngine:
-        """Return (and cache) the engine instance for the given name."""
-        engine = self._engines.get(name)
+    def _engine_for(self, name: str, slot: int) -> AsrEngine:
+        """Return (and cache) this worker's engine instance for the name.
+
+        Each worker keeps its own copy of a model, so parallel jobs never
+        share one engine (and never one model instance in memory).
+        """
+        cache = self._engines[slot]
+        engine = cache.get(name)
         if engine is None:
             engine = (
                 self._engine_factory(name, self.settings)
                 if self._engine_factory
                 else get_asr(name, self.settings)
             )
-            self._engines[name] = engine
+            cache[name] = engine
         return engine
 
     def _llm_client(self) -> LlmClient:

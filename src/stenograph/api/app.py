@@ -351,6 +351,7 @@ def create_app(
             "bridge_language": settings.bridge_language,
             "jitsi_idle_stop_sec": settings.jitsi_idle_stop_sec,
             "restart_recover": settings.restart_recover,
+            "file_workers": service.workers,
             "realtime_transcribe": settings.realtime_transcribe,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,
@@ -367,11 +368,12 @@ def create_app(
 
     @app.get("/api/queue")
     def get_queue() -> dict:
-        """Active and waiting jobs (the worker processes strictly FIFO)."""
+        """Running and waiting jobs. Parallel workers may run several at once."""
         view = service.queue_view()
         active = view["active"]
         return {
             "active": active.model_dump() if active else None,
+            "active_jobs": [job.model_dump() for job in view.get("active_jobs", [])],
             "waiting": [job.model_dump() for job in view["waiting"]],
         }
 
@@ -404,6 +406,7 @@ def create_app(
             bridge=bridge.status(),
             queue={
                 "active": view["active"].model_dump() if view["active"] else None,
+                "active_jobs": [job.model_dump() for job in view.get("active_jobs", [])],
                 "waiting": [job.model_dump() for job in view["waiting"]],
             },
             counts=service.repo.count_by_status(),

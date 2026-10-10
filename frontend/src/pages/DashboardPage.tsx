@@ -9,9 +9,11 @@ export function DashboardPage() {
   const { data: queue, error: queueError } = usePolling(() => api.queue(), 1500);
   const now = useNow(1000);
 
-  const active = queue?.active ?? null;
-  const activeEta = active ? etaSeconds(active) : null;
-  const activeElapsed = active?.started_at != null ? now / 1000 - active.started_at : null;
+  const actives = queue?.active_jobs?.length
+    ? queue.active_jobs
+    : queue?.active
+      ? [queue.active]
+      : [];
   const counts = stats?.jobs.by_status ?? {};
 
   return (
@@ -40,33 +42,46 @@ export function DashboardPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Сейчас в работе">
-          {active ? (
+          {actives.length > 0 ? (
             <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-3">
-                <Link
-                  to={`/jobs/${active.id}`}
-                  className="truncate text-sm font-medium hover:text-accent"
-                >
-                  {active.source_name}
-                </Link>
-                <StatusBadge status={active.status} />
-              </div>
-              <ProgressBar value={active.progress} />
-              <div className="flex items-center justify-between gap-3 text-xs text-muted">
-                <span className="min-w-0 truncate">
-                  {active.progress}% · {active.message || "…"}
-                </span>
-                <span className="tabular shrink-0">
-                  {activeElapsed != null && `прошло ${fmtClock(activeElapsed)}`}
-                  {activeEta != null && ` · осталось ${fmtRemaining(activeEta)}`}
-                </span>
-              </div>
-              {(active.meta.engine || active.meta.duration != null) && (
-                <div className="flex gap-2 text-xs">
-                  {active.meta.engine != null && <Chip>движок: {String(active.meta.engine)}</Chip>}
-                  {active.meta.duration != null && <Chip>аудио: {fmtClock(Number(active.meta.duration))}</Chip>}
-                </div>
-              )}
+              {actives.map((job) => {
+                const eta = etaSeconds(job);
+                const elapsed = job.started_at != null ? now / 1000 - job.started_at : null;
+                return (
+                  <div
+                    key={job.id}
+                    className="flex flex-col gap-3 border-b border-edge/60 pb-3 last:border-0 last:pb-0"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <Link
+                        to={`/jobs/${job.id}`}
+                        className="truncate text-sm font-medium hover:text-accent"
+                      >
+                        {job.source_name}
+                      </Link>
+                      <StatusBadge status={job.status} />
+                    </div>
+                    <ProgressBar value={job.progress} />
+                    <div className="flex items-center justify-between gap-3 text-xs text-muted">
+                      <span className="min-w-0 truncate">
+                        {job.progress}% · {job.message || "…"}
+                      </span>
+                      <span className="tabular shrink-0">
+                        {elapsed != null && `прошло ${fmtClock(elapsed)}`}
+                        {eta != null && ` · осталось ${fmtRemaining(eta)}`}
+                      </span>
+                    </div>
+                    {(job.meta.engine || job.meta.duration != null) && (
+                      <div className="flex gap-2 text-xs">
+                        {job.meta.engine != null && <Chip>движок: {String(job.meta.engine)}</Chip>}
+                        {job.meta.duration != null && (
+                          <Chip>аудио: {fmtClock(Number(job.meta.duration))}</Chip>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <EmptyState title="Воркер свободен" hint="Загрузите файл, чтобы начать обработку." />

@@ -47,10 +47,16 @@ def test_queue_runs_files_before_improvements_and_autos_last(
         service._enqueue(job)
 
     assert queue_priority(auto) > queue_priority(manual) > queue_priority(file_job)
-    assert service._pick_queued() == file_job.id
-    assert service._pick_queued() == manual.id
-    assert service._pick_queued() == auto.id
-    assert service._pick_queued() is None
+    best = service._peek_queued()
+    assert best is not None and best == file_job.id
+    assert service._claim_queued(best) is True
+    best = service._peek_queued()
+    assert best is not None and best == manual.id
+    assert service._claim_queued(best) is True
+    best = service._peek_queued()
+    assert best is not None and best == auto.id
+    assert service._claim_queued(best) is True
+    assert service._peek_queued() is None
 
 
 def test_chain_reprocess_marks_the_child_auto(

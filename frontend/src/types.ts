@@ -89,6 +89,8 @@ export interface Stats {
 
 export interface QueueSnapshot {
   active: Job | null;
+  /** Every job running right now (parallel workers); «active» is the oldest. */
+  active_jobs: Job[];
   waiting: Job[];
 }
 
