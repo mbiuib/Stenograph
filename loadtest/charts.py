@@ -133,7 +133,7 @@ def render(run_dir: Path) -> list[Path]:
     ax3.axhline(100, color="#2e9e5b", ls=":", lw=1)
     ax3.set_ylabel("успеваем, %", color="#2e9e5b")
     ax3.set_ylim(0, 110)
-    ax.legend(handles=[dm, da, ok], fontsize=9, framealpha=1.0)
+    ax3.legend(handles=[dm, da, ok], fontsize=9, framealpha=1.0, loc="upper left")
     ax.grid(alpha=0.3)
     for x, _ in adds:
         ax.axvline(x, color="#999", ls="--", lw=0.8)
