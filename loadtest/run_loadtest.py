@@ -1,10 +1,12 @@
 """Automatic Jitsi load test: N meetings x P participants x S speakers.
 
-Starts a scratch server (unless --base is given), ramps synthetic meetings
-against the real bridge protocol (Jigasi streaming-whisper frames), rotates
-active speakers between different speech samples, samples GPU/VRAM/RSS/CPU,
-event-loop lag and per-meeting text delay, then finalizes, stops the server
-and builds the charts. Everything lands in loadtest/results/<timestamp>/.
+Starts a scratch server (unless --base/--target is given) and ramps
+synthetic meetings against the real bridge protocol (Jitsi streaming-whisper
+frames — the same connection jigasi itself makes), so --target can point at
+any running server, production included. Active speakers rotate between
+different speech samples; GPU/VRAM/RSS/CPU, event-loop lag and per-meeting
+text delay are sampled; the server is stopped (only when this run started
+it) and the charts are built. Everything lands in loadtest/results/<stamp>/.
 
 Run with the project venv python:
   .venv/Scripts/python.exe loadtest/run_loadtest.py \
@@ -20,9 +22,11 @@ import json
 import os
 import random
 import shutil
+import ssl
 import subprocess
 import sys
 import time
+import urllib.parse
 import wave
 from pathlib import Path
 
@@ -47,6 +51,38 @@ def frame_header(participant_id: str) -> bytes:
     return f"{participant_id}|ru-RU".encode().ljust(60, b"\x00")
 
 
+def parse_target(target: str, port: int) -> tuple[str, str]:
+    """(api_base, ws_base) целевого сервера из одного адреса.
+
+    ``--target`` принимает адрес как у jigasi в JIGASI_TRANSCRIBER_WHISPER_URL
+    (хвост /ws не обязателен): например ``https://127.0.0.1`` (прод) или
+    ``http://127.0.0.1:8010``. Пусто — локальный скретч на --port.
+    """
+    value = target.strip().rstrip("/")
+    if value.endswith("/ws"):
+        value = value[:-3]
+    if not value:
+        return f"http://127.0.0.1:{port}", f"ws://127.0.0.1:{port}"
+    if "://" not in value:
+        value = "http://" + value
+    parts = urllib.parse.urlsplit(value)
+    ws_scheme = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}.get(parts.scheme)
+    api_scheme = {"http": "http", "https": "https", "ws": "http", "wss": "https"}.get(parts.scheme)
+    if ws_scheme is None or api_scheme is None or not parts.netloc:
+        raise SystemExit(f"не понимаю адрес: {target!r} (нужен http(s):// или ws(s):// с хостом)")
+    return f"{api_scheme}://{parts.netloc}", f"{ws_scheme}://{parts.netloc}"
+
+
+def ssl_context_for(ws_base: str) -> ssl.SSLContext | None:
+    """TLS-контекст для wss-моста: самоподписанные сертификаты принимаются."""
+    if not ws_base.startswith("wss"):
+        return None
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def load_samples() -> list[np.ndarray]:
     """Read every 16 kHz mono WAV from loadtest/samples/ as int16 arrays."""
     samples = []
@@ -63,8 +99,8 @@ def load_samples() -> list[np.ndarray]:
 
 
 def start_server(args, run_dir: Path) -> subprocess.Popen | None:
-    """Launch the scratch server on --port; None when --base is external."""
-    if args.base:
+    """Launch the scratch server on --port; None for an external --base/--target."""
+    if args.base or args.target:
         return None
     env = os.environ.copy()
     env.update(
@@ -197,23 +233,45 @@ async def feed_speaker(
 
 
 async def run_meeting(
-    idx: int, args, samples_pool: list[np.ndarray], stop: asyncio.Event, state: dict
+    idx: int,
+    args,
+    samples_pool: list[np.ndarray],
+    stop: asyncio.Event,
+    state: dict,
+    client: httpx.AsyncClient,
 ) -> None:
-    """One synthetic meeting: register everyone, keep S speakers talking.
+    """One synthetic meeting: enable decoding, register everyone, keep S talking.
 
     Active speakers rotate every --rotate seconds to a fresh random subset —
-    like a real room where the microphone moves between people.
+    like a real room where the microphone moves between people. Decoding is
+    switched on explicitly, so a record-only server (the production default)
+    is measured too.
     """
     mid = f"load-m{idx:02d}"
     rng = random.Random(9000 + idx)
-    base = f"http://127.0.0.1:{args.port}"
-    ws_url = f"ws://127.0.0.1:{args.port}/ws/{mid}"
+    ws_url = f"{args.ws_base}/ws/{mid}"
     try:
-        ws = await websockets.connect(ws_url, max_size=None, ping_interval=20, ping_timeout=30)
+        ws = await websockets.connect(
+            ws_url, max_size=None, ping_interval=20, ping_timeout=30, ssl=args.ssl_ctx
+        )
     except Exception as exc:  # noqa: BLE001
-        print(f"[{ts()}] встреча {mid}: НЕ подключилась: {exc!r} (сервер {base})", flush=True)
+        print(f"[{ts()}] встреча {mid}: НЕ подключилась: {exc!r} ({ws_url})", flush=True)
         return
     reader = asyncio.create_task(drain(ws))
+    for _attempt in range(4):
+        try:
+            response = await client.post(
+                f"{args.api_base}/api/jitsi/transcribe",
+                data={"meeting_id": mid, "enabled": "true"},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                break
+        except Exception:  # noqa: BLE001 — сессия могла ещё не зарегистрироваться
+            pass
+        await asyncio.sleep(0.5)
+    else:
+        print(f"[{ts()}] встреча {mid}: распознавание включить не удалось (продолжаю)", flush=True)
     silence = np.zeros(3200, dtype="<i2").tobytes()
     pids = [f"u{idx:02d}p{p:02d}" for p in range(1, args.participants + 1)]
     for pid in pids:
@@ -276,7 +334,7 @@ async def run_meeting(
 
 async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Path) -> None:
     """Record resources + backlog every --sample seconds into samples.jsonl."""
-    base = f"http://127.0.0.1:{args.port}"
+    base = args.api_base
     out = (run_dir / "samples.jsonl").open("a", encoding="utf-8")
     prev_committed = prev_wall = None
     health_fail = 0
@@ -407,6 +465,83 @@ async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Pat
         await asyncio.sleep(args.sample)
 
 
+async def _delete_job(client: httpx.AsyncClient, api_base: str, job: dict) -> bool:
+    """DELETE one job on the target; True on success."""
+    try:
+        response = await client.delete(f"{api_base}/api/jobs/{job['id']}", timeout=30)
+        return response.status_code in (200, 204)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def cleanup_jobs(client: httpx.AsyncClient, api_base: str, started_wall: float) -> None:
+    """Remove this run's synthetic jobs from an external server.
+
+    Matches everything carrying this run's ``load-m*`` meeting name and created
+    during the run: the meetings themselves plus their auto-chained
+    improvements/analyses (the target may chain them on meeting close).
+    Meetings still finalising are kept; chained children are cancelled first —
+    otherwise the target would burn minutes of GPU on load-test audio.
+    """
+
+    def is_ours(job: dict) -> bool:
+        return (
+            "load-m" in (job.get("source_name") or "")
+            and float(job.get("created_at") or 0) >= started_wall - 120
+        )
+
+    try:
+        jobs = (await client.get(f"{api_base}/api/jobs?limit=400", timeout=60)).json()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts()}] уборка: список задач недоступен ({exc!r})", flush=True)
+        return
+    removed = kept = 0
+    pending: list[dict] = []
+    for job in jobs:
+        if not is_ours(job):
+            continue
+        status = job.get("status")
+        if status in ("queued", "running") and job.get("kind") == "jitsi":
+            kept += 1
+            print(f"[{ts()}] уборка: {job['source_name'][:52]} ещё {status} — оставляю", flush=True)
+            continue
+        if status in ("queued", "running"):
+            with contextlib.suppress(Exception):
+                await client.post(f"{api_base}/api/jobs/{job['id']}/cancel", timeout=30)
+            pending.append(job)
+            continue
+        if await _delete_job(client, api_base, job):
+            removed += 1
+    for _ in range(20):  # отменённым детям нужно время дойти до cancelled
+        if not pending:
+            break
+        await asyncio.sleep(2)
+        try:
+            fresh = {
+                j["id"]: j
+                for j in (await client.get(f"{api_base}/api/jobs?limit=400", timeout=60)).json()
+            }
+        except Exception:  # noqa: BLE001
+            break
+        still: list[dict] = []
+        for job in pending:
+            current = fresh.get(job["id"])
+            if current is None:
+                removed += 1
+            elif current.get("status") in ("queued", "running"):
+                still.append(current)
+            elif await _delete_job(client, api_base, current):
+                removed += 1
+        pending = still
+    for job in pending:
+        kept += 1
+        print(
+            f"[{ts()}] уборка: {job['source_name'][:52]} всё ещё {job.get('status')} — оставляю",
+            flush=True,
+        )
+    print(f"[{ts()}] уборка: удалено {removed}, оставлено {kept}", flush=True)
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -435,6 +570,16 @@ async def main() -> None:
     )
     parser.add_argument("--label", default="", help="суффикс папки результатов")
     parser.add_argument(
+        "--target",
+        default="",
+        help="адрес целевого сервера как у jigasi (http(s)/ws(s); прод: https://127.0.0.1)",
+    )
+    parser.add_argument(
+        "--keep-jobs",
+        action="store_true",
+        help="не удалять синтетические задачи с внешнего сервера",
+    )
+    parser.add_argument(
         "--keep-data",
         action="store_true",
         help="сохранить записанное аудио (data/ в папке запуска)",
@@ -443,6 +588,8 @@ async def main() -> None:
         "--max-seconds", type=float, default=2700, help="жёсткий предохранитель всего прогона"
     )
     args = parser.parse_args()
+    args.api_base, args.ws_base = parse_target(args.target, args.port)
+    args.ssl_ctx = ssl_context_for(args.ws_base)
 
     samples_pool = load_samples()
     if not samples_pool:
@@ -454,6 +601,9 @@ async def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"результаты: {run_dir}", flush=True)
     print(f"сэмплов речи: {len(samples_pool)}", flush=True)
+    external = bool(args.target or args.base)
+    mode = "внешний сервер (не поднимаю и не останавливаю)" if external else f"скретч :{args.port}"
+    print(f"цель: {args.api_base} · мост {args.ws_base} — {mode}", flush=True)
 
     proc = start_server(args, run_dir)
     stop = asyncio.Event()
@@ -467,13 +617,15 @@ async def main() -> None:
     started_wall = time.time()
     started_mono = time.monotonic()
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=False) as client:
             sampler = asyncio.create_task(sample_loop(args, state, client, run_dir))
             tasks = []
             for k in range(1, args.meetings + 1):
                 if state["abort"] or time.monotonic() - started_mono > args.max_seconds:
                     break
-                tasks.append(asyncio.create_task(run_meeting(k, args, samples_pool, stop, state)))
+                tasks.append(
+                    asyncio.create_task(run_meeting(k, args, samples_pool, stop, state, client))
+                )
                 waited = 0.0
                 while waited < args.step and not state["abort"]:
                     await asyncio.sleep(1)
@@ -495,21 +647,22 @@ async def main() -> None:
             await asyncio.sleep(30)  # сессиям нужно время финализироваться
             sampler.cancel()
             try:
-                jobs = (
-                    await client.get(f"http://127.0.0.1:{args.port}/api/jobs?limit=300", timeout=60)
-                ).json()
+                jobs = (await client.get(f"{args.api_base}/api/jobs?limit=300", timeout=60)).json()
             except Exception:  # noqa: BLE001
                 jobs = []
+            if external and not args.keep_jobs:
+                await cleanup_jobs(client, args.api_base, started_wall)
     finally:
-        stop_server(proc, args.port)
-        if not args.keep_data:
-            shutil.rmtree(run_dir / "data", ignore_errors=True)
+        if proc is not None:  # чужой сервер не останавливаем никогда
+            stop_server(proc, args.port)
+            if not args.keep_data:
+                shutil.rmtree(run_dir / "data", ignore_errors=True)
 
     mine = [
         j for j in jobs if j.get("kind") == "jitsi" and "load-m" in (j.get("source_name") or "")
     ]
     summary = {
-        "args": vars(args),
+        "args": {k: v for k, v in vars(args).items() if k != "ssl_ctx"},
         "samples": [p.name for p in sorted(SAMPLES_DIR.glob("*.wav"))],
         "elapsed_sec": round(time.time() - started_wall, 1),
         "abort": state["abort"],

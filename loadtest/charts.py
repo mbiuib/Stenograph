@@ -67,12 +67,11 @@ def render(run_dir: Path) -> list[Path]:
         r"батч-раунд: (\d+) окон за ([\d.]+) с "
         r"\(сбор ([\d.]+), инференс ([\d.]+), применение ([\d.]+)\)"
     )
+    log_path = run_dir / "server.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
     rounds = [
         (int(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)))
-        for m in (
-            pat.search(line)
-            for line in (run_dir / "server.log").open(encoding="utf-8", errors="replace")
-        )
+        for m in (pat.search(line) for line in log_text.splitlines())
         if m
     ]
 
