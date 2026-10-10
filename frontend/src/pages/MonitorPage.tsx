@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { Card, Chip, EmptyState, ErrorBanner, ProgressBar, StatCard } from "../components/ui";
@@ -19,6 +20,20 @@ function fmtIdle(sec: number | null): string {
 
 export function MonitorPage() {
   const { data, error } = usePolling(() => api.metrics(), 2000);
+  const [unloadNote, setUnloadNote] = useState<string | null>(null);
+
+  const handleUnload = async () => {
+    try {
+      const result = await api.unloadModels();
+      setUnloadNote(
+        result.unloaded.length > 0
+          ? `Выгружено: ${result.unloaded.join(", ")}`
+          : "Нечего выгружать — все модели заняты",
+      );
+    } catch (err) {
+      setUnloadNote(`Ошибка выгрузки: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   const gpu = data?.system.gpu ?? null;
   const self = data?.system.self_process ?? null;
@@ -129,9 +144,23 @@ export function MonitorPage() {
           ) : (
             <EmptyState
               title="Ни одна модель ещё не загружена"
-              hint="Модель загрузится при первой задаче и останется в памяти до перезапуска."
+              hint="Модель загрузится при первой задаче; простаивающие выгружаются автоматически."
             />
           )}
+          <div className="mt-3 flex items-center justify-between gap-3 border-t border-edge/60 pt-3">
+            <span className="min-w-0 truncate text-xs text-muted">
+              {unloadNote ?? "Простаивающие модели выгружаются автоматически."}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:border-accent/60 hover:text-accent"
+              onClick={() => {
+                void handleUnload();
+              }}
+            >
+              Выгрузить простаивающие
+            </button>
+          </div>
         </Card>
       </div>
 

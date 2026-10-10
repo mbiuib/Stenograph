@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import __version__, loopwatch, metrics
+from .. import __version__, loopwatch, metrics, model_budget
 from ..audio import ensure_mix, existing_tracks, mixable_tracks, source_file, track_kind
 from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
@@ -63,6 +63,7 @@ def create_app(
     settings = settings or get_settings()
     settings.ensure_dirs()
     metrics.prime()
+    model_budget.configure(settings.model_idle_unload_sec)
     service = service or build_default_service(settings)
     live = live or LiveManager(
         settings,
@@ -352,6 +353,7 @@ def create_app(
             "jitsi_idle_stop_sec": settings.jitsi_idle_stop_sec,
             "restart_recover": settings.restart_recover,
             "file_workers": service.workers,
+            "model_idle_unload_sec": settings.model_idle_unload_sec,
             "realtime_transcribe": settings.realtime_transcribe,
             "whisper_model": settings.whisper_model,
             "live_model": settings.live_model,
@@ -411,6 +413,15 @@ def create_app(
             },
             counts=service.repo.count_by_status(),
         )
+
+    @app.post("/api/models/unload")
+    def unload_models() -> dict:
+        """Unload idle ASR models now (frees VRAM/RAM); busy ones are kept.
+
+        The manual path works even when MEETSCRIBE_MODEL_IDLE_UNLOAD_SEC=0
+        (automatic eviction off).
+        """
+        return {"unloaded": model_budget.evict_idle(force=True)}
 
     # -- live sessions -------------------------------------------------------
 

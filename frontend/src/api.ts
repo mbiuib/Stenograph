@@ -83,6 +83,9 @@ export const api = {
   config: (): Promise<AppConfig> => request<AppConfig>("/api/config"),
   metrics: (): Promise<MetricsSnapshot> => request<MetricsSnapshot>("/api/metrics"),
 
+  unloadModels: (): Promise<{ unloaded: string[] }> =>
+    request<{ unloaded: string[] }>("/api/models/unload", { method: "POST" }),
+
   liveStatus: (): Promise<LiveStatus> => request<LiveStatus>("/api/live/status"),
 
   jitsiStatus: (): Promise<JitsiStatus> => request<JitsiStatus>("/api/jitsi/status"),

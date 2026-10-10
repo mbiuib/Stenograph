@@ -124,3 +124,33 @@ def test_upload_and_complete(tmp_path: Path) -> None:
 
     assert client.get("/api/jobs/missing").status_code == 404
     assert client.delete(f"/api/jobs/{job_id}").status_code == 204
+
+
+def test_models_unload_endpoint_frees_idle_engines(tmp_path: Path) -> None:
+    """The manual unload path: registered idle engines are freed."""
+    from stenograph import model_budget
+
+    class IdleEngine:
+        """Unloadable double registered in the model-budget registry."""
+
+        name = "whisper"
+        model_id = "turbo"
+
+        def __init__(self) -> None:
+            self.unloaded = 0
+
+        def unload(self) -> None:
+            self.unloaded += 1
+
+    service = _make_service(tmp_path)
+    client = TestClient(create_app(settings=service.settings, service=service))
+    config = client.get("/api/config").json()
+    assert config["model_idle_unload_sec"] == 600.0
+
+    engine = IdleEngine()
+    model_budget.mark_busy(engine)
+    model_budget.mark_idle(engine)
+    response = client.post("/api/models/unload")
+    assert response.status_code == 200
+    assert response.json()["unloaded"] == ["whisper:turbo"]
+    assert engine.unloaded == 1

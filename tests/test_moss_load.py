@@ -12,6 +12,7 @@ import threading
 import time
 import types
 
+from stenograph import model_budget
 from stenograph.engines.moss import MossEngine
 
 
@@ -88,3 +89,32 @@ def test_same_instance_loads_once(monkeypatch) -> None:
     second = engine._load()
     assert state["calls"] == 1
     assert first[1] is second[1]
+
+
+class _BystanderEngine:
+    """Idle unloadable double used to observe evict-on-load."""
+
+    name = "whisper"
+    model_id = "turbo"
+
+    def __init__(self) -> None:
+        self.unloaded = 0
+
+    def unload(self) -> None:
+        """Record the eviction."""
+        self.unloaded += 1
+
+
+def test_moss_load_evicts_idle_models_first(monkeypatch) -> None:
+    """The loading engine takes the memory of models sitting idle."""
+    state = {"live": 0, "max_live": 0, "calls": 0}
+    _install_fake_transformers(monkeypatch, state)
+    model_budget.configure(600)
+    bystander = _BystanderEngine()
+    model_budget.mark_busy(bystander)
+    model_budget.mark_idle(bystander)  # registered, idle
+
+    engine = MossEngine(model_id="org/model", models_dir=None)
+    engine._load()
+
+    assert bystander.unloaded == 1

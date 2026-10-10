@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # the model it needs — GPU/CPU memory multiplies by the count. While a
     # live/Jitsi stream decodes, every worker holds heavy ASR back.
     file_workers: int = 1
+    # MEETSCRIBE_MODEL_IDLE_UNLOAD_SEC: unload ASR models that sat idle this
+    # long (frees VRAM/RAM; 0 disables the automatic behaviour, the manual
+    # button on the monitor stays available). A model that is ABOUT to load
+    # always evicts currently idle ones first — it takes their memory.
+    model_idle_unload_sec: float = 600.0
 
     # MOSS-Transcribe-Diarize (end-to-end ASR + diarization).
     moss_chunk_sec: float = 300.0

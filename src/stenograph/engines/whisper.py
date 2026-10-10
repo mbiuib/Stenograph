@@ -8,6 +8,7 @@ those are re-split on word boundaries.
 
 from __future__ import annotations
 
+import gc
 import logging
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,8 @@ import numpy as np
 from .. import cuda
 from ..domain.errors import JobCancelled
 from ..domain.models import Segment
-from ..metrics import note_model_loaded, touch_engine
+from ..metrics import note_model_loaded, note_model_unloaded, touch_engine
+from ..model_budget import evict_idle, tracked
 from .base import (
     AsrResult,
     CancelCallback,
@@ -75,11 +77,23 @@ class FasterWhisperEngine:
             from faster_whisper import WhisperModel
 
             ref = self.resolve_model()
+            # A model that needs memory takes it from idle ones first.
+            evict_idle(exclude=self)
             log.info("loading whisper model '%s' on %s (%s)", ref, self.device, self.compute_type)
             self._model = WhisperModel(ref, device=self.device, compute_type=self.compute_type)
             note_model_loaded(self.name, self.model_id)
         return self._model
 
+    def unload(self) -> None:
+        """Release the model and free its GPU memory (idle eviction)."""
+        if self._model is None:
+            return
+        self._model = None
+        gc.collect()
+        note_model_unloaded(self.name, self.model_id)
+        log.info("whisper model '%s' unloaded", self.model_id)
+
+    @tracked
     def transcribe(
         self,
         audio_path: Path,
@@ -166,6 +180,7 @@ class FasterWhisperEngine:
             ],
         )
 
+    @tracked
     def transcribe_window(
         self,
         audio: np.ndarray,
@@ -207,6 +222,7 @@ class FasterWhisperEngine:
                     )
         return words
 
+    @tracked
     def transcribe_batch(
         self, windows: list[np.ndarray], *, language: str | None = None
     ) -> list[list[tuple[float, float, str]]]:

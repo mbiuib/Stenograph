@@ -32,7 +32,8 @@ import numpy as np
 
 from ..domain.errors import JobCancelled
 from ..domain.models import Segment
-from ..metrics import note_model_loaded, touch_engine
+from ..metrics import note_model_loaded, note_model_unloaded, touch_engine
+from ..model_budget import evict_idle, tracked
 from .base import (
     AsrResult,
     CancelCallback,
@@ -229,6 +230,8 @@ class MossEngine:
                 gc.collect()
                 if self._torch.cuda.is_available():
                     self._torch.cuda.empty_cache()
+        note_model_unloaded(self.name, self.model_id)
+        log.info("MOSS model '%s' unloaded", self.model_id)
 
     def resolve_model(self) -> tuple[str, bool]:
         """Return ``(source, local_only)``, preferring a pre-downloaded local copy."""
@@ -254,6 +257,8 @@ class MossEngine:
         with self._load_lock:
             if self._model is not None:
                 return self._torch, self._model, self._processor
+            # A model that needs memory takes it from idle ones first.
+            evict_idle(exclude=self)
             try:
                 import torch
                 from transformers import AutoModelForCausalLM, AutoProcessor
@@ -300,6 +305,7 @@ class MossEngine:
             note_model_loaded(self.name, self.model_id)
             return self._torch, self._model, self._processor
 
+    @tracked
     def transcribe(
         self,
         audio_path: Path,

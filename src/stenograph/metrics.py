@@ -282,6 +282,22 @@ def touch_engine(engine: object) -> None:
         log.debug("metrics: touch failed", exc_info=True)
 
 
+def note_model_unloaded(engine: str, model: str) -> None:
+    """Drop an evicted model from the resident list and rebase load deltas.
+
+    After the unload, the next :func:`note_model_loaded` measures the fresh
+    footprint from the post-eviction memory level (otherwise it would report
+    a mid-air baseline delta).
+    """
+    global _BASELINE
+    gpu = gpu_info()
+    rss, _ = process_memory_mb()
+    with _LOCK:
+        _MODELS.pop(f"{engine}:{model}", None)
+        _BASELINE = (gpu["vram_used_mb"] if gpu else None, rss)
+    log.info("metrics: %s:%s unloaded", engine, model)
+
+
 def snapshot(
     *,
     live: dict | None = None,
