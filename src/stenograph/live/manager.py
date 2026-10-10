@@ -289,11 +289,14 @@ class LiveManager:
         the websocket — see clientinfo.py): it lands in the metadata and its
         short tag («Chrome · Windows») goes into the job name.
         """
+        device = short_device_tag(client)
+        if client is not None and device:
+            client = {**client, "device": device}
         return self._begin(
             tracks,
             language,
             capture_factory=None,
-            source_name=live_name(device=short_device_tag(client), title=title),
+            source_name=live_name(device=device, title=title),
             capture_mode="browser",
             server=False,
             transcribe=transcribe,

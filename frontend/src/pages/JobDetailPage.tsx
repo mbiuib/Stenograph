@@ -65,6 +65,9 @@ export function JobDetailPage() {
 
   const analysisMeta = job?.meta.analysis ?? {};
   const llmInfo = appConfig?.llm;
+  // Клиентский отчёт (браузер) и метки захваченных устройств — для карточки метаданных.
+  const clientInfo = (job?.meta.client as Record<string, string> | undefined) ?? null;
+  const captureDevices = (job?.meta.capture_devices as Record<string, string> | undefined) ?? null;
 
   // Подхватываем незавершённый анализ после перезагрузки страницы.
   useEffect(() => {
@@ -666,6 +669,27 @@ export function JobDetailPage() {
         {job.meta.size != null && (
           <MetaRow label="Размер" value={`${(Number(job.meta.size) / 1048576).toFixed(1)} МБ`} />
         )}
+        {typeof job.meta.room === "string" && job.meta.room !== "" && (
+          <MetaRow label="Комната" value={job.meta.room} />
+        )}
+        {clientInfo != null && (clientInfo.device || clientInfo.platform) && (
+          <MetaRow label="Устройство" value={clientInfo.device || clientInfo.platform} />
+        )}
+        {clientInfo?.host && <MetaRow label="Машина" value={clientInfo.host} />}
+        {clientInfo?.ip && <MetaRow label="IP клиента" value={clientInfo.ip} />}
+        {clientInfo?.screen && (
+          <MetaRow
+            label="Экран"
+            value={
+              clientInfo.pixel_ratio
+                ? `${clientInfo.screen} @${clientInfo.pixel_ratio}×`
+                : clientInfo.screen
+            }
+          />
+        )}
+        {clientInfo?.timezone && <MetaRow label="Часовой пояс" value={clientInfo.timezone} />}
+        {captureDevices?.mic && <MetaRow label="Микрофон" value={captureDevices.mic} />}
+        {captureDevices?.system && <MetaRow label="Звук системы" value={captureDevices.system} />}
       </Card>
     </div>
   );

@@ -142,6 +142,7 @@ def test_web_live_ws_client_device_info(tmp_path: Path) -> None:
         job.source_name,
     ), job.source_name
     assert job.meta["client"]["user_agent"] == user_agent
+    assert job.meta["client"]["device"] == "Chrome 141 · Windows"
     assert job.meta["client"]["language"] == "ru-RU"
     assert job.meta["client"]["ip"]  # stamped from the websocket
     assert job.meta["capture_devices"] == {"mic": "Микрофон (USB Audio)"}
