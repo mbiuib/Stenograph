@@ -13,7 +13,7 @@ ffmpeg (MEETSCRIBE_FFMPEG from the project .env, or PATH).
 
 Usage:
   .venv/Scripts/python.exe loadtest/prepare_samples.py [--per-source 3]
-      [--chunk-sec 14] [--latest-live 6] [--from-jitsi 8] [файл | папка ...]
+      [--chunk-sec 14] [--count 100] [--latest-live 6] [--from-jitsi 8] [файл | папка ...]
 """
 
 from __future__ import annotations
@@ -184,7 +184,18 @@ def main() -> None:
     parser.add_argument(
         "sources", nargs="*", type=Path, help="входные WAV 16 кГц моно (файлы или папки)"
     )
-    parser.add_argument("--per-source", type=int, default=3, help="чанков с каждого источника")
+    parser.add_argument(
+        "--per-source",
+        type=int,
+        default=3,
+        help="чанков с каждого источника (если не задан --count)",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=0,
+        help="целевое общее число сэмплов (распределяется по источникам; 0 — по --per-source)",
+    )
     parser.add_argument("--chunk-sec", type=float, default=14.0, help="длина чанка, секунды")
     parser.add_argument(
         "--latest-live", type=int, default=6, help="сколько свежих live-записей (system+mic)"
@@ -211,6 +222,12 @@ def main() -> None:
             "не нашёл источников речи — передайте файлы/папки явно: "
             "prepare_samples.py путь/к/записи.wav ..."
         )
+    per_source = args.per_source
+    if args.count > 0 and sources:
+        per_source = max(1, (args.count + len(sources) - 1) // len(sources) + 1)
+        print(
+            f"цель: {args.count} сэмплов → до {per_source} с каждого из {len(sources)} источников"
+        )
     OUT.mkdir(parents=True, exist_ok=True)
     ffmpeg = find_ffmpeg()
     temp_dir = Path(tempfile.mkdtemp(prefix="prepare-samples-"))
@@ -223,12 +240,21 @@ def main() -> None:
             wav = ensure_wav16k(source, ffmpeg, temp_dir)
             if wav is None:
                 continue
-            made = cut(wav, args.per_source, args.chunk_sec, OUT, total)
+            made = cut(wav, per_source, args.chunk_sec, OUT, total)
             if made:
                 print(f"{source} → {made} чанк(ов) по {args.chunk_sec:.0f} с")
             total += made
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+    if args.count > 0 and total > args.count:  # надрезаем до целевого числа
+        extras = 0
+        for index in range(args.count, total):
+            path = OUT / f"sample_{index:02d}.wav"
+            if path.exists():
+                path.unlink()
+                extras += 1
+        print(f"подрезал до --count {args.count} (лишних удалено: {extras})")
+        total = args.count
     if total > 0:  # после успешной нарезки чистим хвосты прошлых наборов
         fresh = {f"sample_{i:02d}.wav" for i in range(total)}
         for old in sorted(OUT.glob("sample_*.wav")):
@@ -236,7 +262,8 @@ def main() -> None:
                 old.unlink()
                 print(f"устаревший удалён: {old.name}")
     if total:
-        print(f"готово: {total} сэмплов в {OUT}")
+        note = f" (материала хватило на {total} из {args.count})" if args.count > total else ""
+        print(f"готово: {total} сэмплов в {OUT}{note}")
     else:
         print("готово: ничего не нарезано (все источники пропущены)")
 
