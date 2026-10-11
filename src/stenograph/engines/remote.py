@@ -18,7 +18,8 @@ import threading
 import uuid
 from pathlib import Path
 
-from ..asr_client import RemoteAsrClient
+from .. import asr_client
+from ..asr_client import AsrServiceError, RemoteAsrClient
 from ..config import Settings
 from ..domain.errors import JobCancelled
 from .base import (
@@ -30,6 +31,29 @@ from .base import (
     SegmentCallback,
     TranscribeOptions,
 )
+
+_CLIENTS: dict[tuple[str, float], RemoteAsrClient] = {}
+_CLIENTS_LOCK = threading.Lock()
+
+
+def remote_client_for(settings: Settings) -> RemoteAsrClient:
+    """Клиент сервиса под ТЕКУЩИЕ адрес и тайм-аут (меняются в рантайме).
+
+    Кэш по (url, timeout): при смене адреса в «Настройках» следующий же
+    вызов (файл или окно субтитров) уйдёт на новый сервис — без
+    перезапуска; старые клиенты доживают своё и остаются в кэше.
+    """
+    url = settings.asr_url.rstrip("/")
+    if not url:
+        raise AsrServiceError("адрес ASR-сервиса не задан (Настройки → Внешний ASR-сервис)")
+    key = (url, float(settings.asr_timeout_sec))
+    with _CLIENTS_LOCK:
+        client = _CLIENTS.get(key)
+        if client is None:
+            # Класс резолвим через модуль: живые тесты патчат его там.
+            client = asr_client.RemoteAsrClient(key[0], file_timeout=key[1])
+            _CLIENTS[key] = client
+        return client
 
 
 class RemoteAsrEngine:
@@ -43,9 +67,14 @@ class RemoteAsrEngine:
         client: RemoteAsrClient | None = None,
     ) -> None:
         self.name = name
-        self._client = client or RemoteAsrClient(
-            settings.asr_url, file_timeout=settings.asr_timeout_sec
-        )
+        self._settings = settings
+        self._client = client  # None: клиент резолвится по текущим настройкам
+
+    def _active_client(self) -> RemoteAsrClient:
+        """Клиент под текущий адрес сервиса (настройки могут меняться)."""
+        if self._client is not None:
+            return self._client
+        return remote_client_for(self._settings)
 
     def transcribe(
         self,
@@ -62,6 +91,7 @@ class RemoteAsrEngine:
             raise JobCancelled()
         if pause_gate is not None:
             pause_gate()
+        client = self._active_client()
         request_id = uuid.uuid4().hex
         stopping = threading.Event()
         if is_cancelled is not None:
@@ -70,12 +100,12 @@ class RemoteAsrEngine:
             def _watch() -> None:
                 while not stopping.wait(0.5):
                     if is_cancelled():
-                        self._client.cancel_transcription(request_id)
+                        client.cancel_transcription(request_id)
                         return
 
             threading.Thread(target=_watch, name="asr-cancel-watch", daemon=True).start()
         try:
-            result = self._client.transcribe_file(
+            result = client.transcribe_file(
                 audio_path,
                 model=self.name,
                 language=options.language,

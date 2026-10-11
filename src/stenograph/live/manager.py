@@ -101,34 +101,31 @@ def _remote_engine_bundle(
     The realtime path always speaks whisper on the service side; the model
     lives there, this process only marshals audio windows over HTTP.
     """
-    from ..asr_client import REALTIME_MODEL, RemoteAsrClient
+    from ..asr_client import REALTIME_MODEL
+    from ..engines.remote import remote_client_for
 
-    key = ("remote", settings.asr_url, "", "")
-    with _ENGINE_FACTORIES_LOCK:
-        bundle = _ENGINE_FACTORIES.get(key)
-        if bundle is None:
-            client = RemoteAsrClient(settings.asr_url, file_timeout=settings.asr_timeout_sec)
+    # Клиента резолвим на КАЖДЫЙ вызов: смена адреса в «Настройках»
+    # подхватывается со следующего окна, без перезапуска сервера. Сами
+    # фабрики-замыкания дешёвы — кэш не нужен (и не залипает на старых
+    # настройках в тестах), клиенты кэширует remote_client_for по адресу.
+    def factory(language: str | None) -> WindowTranscriber:
+        def transcribe(audio: np.ndarray) -> list[WindowWord]:
+            results = remote_client_for(settings).transcribe_windows(
+                [audio], model=REALTIME_MODEL, language=language
+            )
+            return results[0] if results else []
 
-            def factory(language: str | None) -> WindowTranscriber:
-                def transcribe(audio: np.ndarray) -> list[WindowWord]:
-                    results = client.transcribe_windows(
-                        [audio], model=REALTIME_MODEL, language=language
-                    )
-                    return results[0] if results else []
+        return transcribe
 
-                return transcribe
+    def batch_factory(language: str | None) -> BatchWindowTranscriber:
+        def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
+            return remote_client_for(settings).transcribe_windows(
+                windows, model=REALTIME_MODEL, language=language
+            )
 
-            def batch_factory(language: str | None) -> BatchWindowTranscriber:
-                def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
-                    return client.transcribe_windows(
-                        windows, model=REALTIME_MODEL, language=language
-                    )
+        return transcribe
 
-                return transcribe
-
-            bundle = (factory, batch_factory)
-            _ENGINE_FACTORIES[key] = bundle
-        return bundle
+    return factory, batch_factory
 
 
 def _build_engine_bundle(

@@ -52,6 +52,9 @@ def test_settings_endpoint_lists_groups_and_items(tmp_path: Path) -> None:
     assert drop["value"] is False  # по умолчанию — прежнее поведение
     assert drop["editable"] is True
 
+    assert _find(snapshot, "file_workers")["applies"] == "live"
+    assert _find(snapshot, "asr_url")["applies"] == "live"
+
     secret = _find(snapshot, "llm_api_key")
     assert secret["value"] is None  # секреты не утекают в UI
     assert secret["editable"] is False
@@ -137,6 +140,10 @@ def test_settings_appliers_reach_live_components(tmp_path: Path) -> None:
     response = client.patch("/api/settings", json={"values": {"bridge_finalize_concurrency": 3}})
     assert response.json()["errors"] == {}
     assert app.state.bridge._finalize_gate._value == 3
+
+    response = client.patch("/api/settings", json={"values": {"file_workers": 3}})
+    assert response.json()["errors"] == {}
+    assert app.state.service.workers == 3  # воркеры добавлены без перезапуска
 
 
 def test_settings_startup_applies_saved_overrides(tmp_path: Path) -> None:

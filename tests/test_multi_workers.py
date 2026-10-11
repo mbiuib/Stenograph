@@ -256,3 +256,38 @@ def test_cancel_a_queued_job_is_immediate(tmp_path: Path) -> None:
     assert _job(repo, job_b.id).status == JobStatus.CANCELLED
     # Движок запускался ровно один раз — отменённую задачу не считали.
     assert len(state["runs"]) == 1, state["runs"]
+
+def test_workers_scale_up_and_down_at_runtime(tmp_path: Path) -> None:
+    """Смена числа воркеров на лету: рост берёт очередь, лишние доработают и уходят."""
+    state = _state()
+    service, repo = _make_service(tmp_path, 1, lambda n, s: GatedEngine(state))
+    job_a = service.submit_file(_wav(tmp_path, "a.wav"))
+    job_b = service.submit_file(_wav(tmp_path, "b.wav"))
+
+    assert _wait(lambda: _job(repo, job_a.id).status == JobStatus.RUNNING), state
+    assert _job(repo, job_b.id).status == JobStatus.QUEUED
+
+    # Рост: новый воркер стартует сразу и подхватывает ждущую задачу.
+    assert service.set_workers(2) == 2
+    assert service.workers == 2
+    assert _wait(
+        lambda: state["max_live"] >= 2 and _job(repo, job_b.id).status == JobStatus.RUNNING,
+        timeout=5,
+    ), state
+
+    # Сокращение: лишний дорабатывает текущую задачу и завершается.
+    assert service.set_workers(1) == 1
+    assert service.workers == 1
+    state["release"].set()
+    assert _wait(
+        lambda: _job(repo, job_a.id).status == JobStatus.DONE
+        and _job(repo, job_b.id).status == JobStatus.DONE,
+        timeout=10,
+    )
+    assert _wait(lambda: _alive_workers(service) == 1, timeout=5), service._threads
+
+
+def _alive_workers(service: TranscriptionService) -> int:
+    """Сколько воркеров реально работает прямо сейчас."""
+    return sum(1 for thread in service._threads if thread.is_alive())
+

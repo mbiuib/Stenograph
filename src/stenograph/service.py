@@ -84,6 +84,7 @@ class TranscriptionService:
         self._waiting: list[str] = []
         self._active_ids: list[str] = []  # running jobs, oldest first
         self._cancel_events: dict[str, threading.Event] = {}
+        self._retiring: set[int] = set()  # слоты воркеров, уходящих после задачи
         self._lock = threading.Lock()
         self._threads = [
             threading.Thread(
@@ -101,6 +102,49 @@ class TranscriptionService:
     def workers(self) -> int:
         """Effective number of parallel file/reprocess workers."""
         return self._workers
+
+    def set_workers(self, count: int) -> int:
+        """Сменить число воркеров на лету; возвращает действующее число.
+
+        Рост: новые потоки стартуют сразу (у каждого — свой кэш движков).
+        Сокращение: лишние слоты помечаются на выход — воркер доработает
+        текущую задачу, отдаст токен очереди живым и завершится (≤ ~0.5 с
+        простоя). Настройка применяется из «Настроек» без перезапуска.
+        """
+        count = max(1, min(8, int(count or 1)))
+        with self._lock:
+            active = [
+                slot
+                for slot, thread in enumerate(self._threads)
+                if thread.is_alive() and slot not in self._retiring
+            ]
+            if count > len(active):
+                for _ in range(count - len(active)):
+                    slot = len(self._threads)
+                    self._engines.append({})
+                    thread = threading.Thread(
+                        target=self._work_loop,
+                        args=(slot,),
+                        name=f"stenograph-worker-{slot + 1}",
+                        daemon=True,
+                    )
+                    self._threads.append(thread)
+                    thread.start()
+            elif count < len(active):
+                self._retiring.update(active[count:])
+            self._workers = count
+        log.info("file_workers -> %d (активных было %d)", count, len(active))
+        return count
+
+    def _is_retiring(self, slot: int) -> bool:
+        """True, когда слот сокращён: воркер завершится при пробуждении."""
+        with self._lock:
+            return slot in self._retiring
+
+    def _release_slot(self, slot: int) -> None:
+        """Освободить кэш движков уволенного воркера (память вернётся)."""
+        with self._lock:
+            self._engines[slot] = {}
 
     def submit_file(
         self,
@@ -503,7 +547,21 @@ class TranscriptionService:
 
     def _work_loop(self, slot: int) -> None:
         while True:
-            self._queue.get()  # wake-up: at least one job is waiting
+            try:
+                job_id = self._queue.get(timeout=0.5)  # wake-up: a job is waiting
+            except queue.Empty:
+                if self._is_retiring(slot):
+                    self._release_slot(slot)
+                    log.info("worker %d завершился (воркеров стало меньше)", slot + 1)
+                    return
+                continue
+            if self._is_retiring(slot):
+                # Уходим, не съедая токен: живой воркер должен увидеть задачу.
+                self._queue.task_done()
+                self._queue.put(job_id)
+                self._release_slot(slot)
+                log.info("worker %d завершился (воркеров стало меньше)", slot + 1)
+                return
             try:
                 self._serve_waiting(slot)
             except Exception:  # the worker must survive anything a job throws

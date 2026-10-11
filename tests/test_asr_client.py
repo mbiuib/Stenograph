@@ -11,6 +11,7 @@ import httpx
 import numpy as np
 import pytest
 
+import stenograph.engines.remote as remote_module
 from stenograph.asr_client import (
     AsrServiceError,
     RemoteAsrClient,
@@ -265,4 +266,65 @@ def test_remote_engine_without_flag_runs_to_completion() -> None:
     assert [segment.text for segment in result.segments] == ["ок"]
     # request_id всё равно передаётся (сервис знает запрос), отмены нет.
     assert calls and calls[0]["request_id"]
+
+def test_remote_engine_picks_up_a_changed_service_url(tmp_path: Path, monkeypatch) -> None:
+    """Смена адреса сервиса применяется без перезагрузки — со следующего вызова."""
+    seen: list[str] = []
+
+    class StubClient:
+        """Клиент-заглушка, запоминающий адрес, к которому «сходил»."""
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def transcribe_file(self, path, *, model, language=None, request_id=None):
+            seen.append(self.url)
+            return AsrResult(
+                language="ru",
+                language_probability=0.9,
+                duration=1.0,
+                segments=[Segment(index=0, start=0.0, end=1.0, text="ок")],
+            )
+
+        def cancel_transcription(self, request_id, **kwargs) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        remote_module, "remote_client_for", lambda settings: StubClient(settings.asr_url)
+    )
+    settings = _settings(tmp_path)
+    settings.asr_url = "http://asr-a.test"
+    engine = RemoteAsrEngine("whisper", settings)
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFF")
+
+    engine.transcribe(audio, TranscribeOptions())
+    settings.asr_url = "http://asr-b.test"
+    engine.transcribe(audio, TranscribeOptions())
+
+    assert seen == ["http://asr-a.test", "http://asr-b.test"]
+
+def test_live_windows_follow_a_changed_service_url(tmp_path: Path, monkeypatch) -> None:
+    """Окна субтитров уходят на новый адрес сразу после смены настройки."""
+    seen: list[str] = []
+
+    class StubClient:
+        """Запоминает адрес каждого вызова окон."""
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def transcribe_windows(self, windows, *, model, language=None, timeout=None):
+            seen.append(self.url)
+            return [[(0.0, 1.0, "ок")] for _ in windows]
+
+    monkeypatch.setattr(
+        remote_module, "remote_client_for", lambda settings: StubClient(settings.asr_url)
+    )
+    settings = _settings(tmp_path, asr_backend="remote", asr_url="http://win-a.test")
+    factory, batch_factory = live_manager._engine_bundle(settings)
+    factory("ru")(_tone(0.5))
+    settings.asr_url = "http://win-b.test"
+    batch_factory("ru")([_tone(0.5)])
+    assert seen == ["http://win-a.test", "http://win-b.test"]
 

@@ -117,6 +117,11 @@ def create_app(
     # а этим компонентам нужно передать его отдельно).
     settings_service.add_applier("model_idle_unload_sec", model_budget.configure)
 
+    def _apply_file_workers(value: Any) -> None:
+        service.set_workers(int(value))
+
+    settings_service.add_applier("file_workers", _apply_file_workers)
+
     def _apply_auto_reprocess(value: bool) -> None:
         live._auto_reprocess = value  # noqa: SLF001 — смена тумблера без пересборки менеджеров
         bridge._auto_reprocess = value  # noqa: SLF001
