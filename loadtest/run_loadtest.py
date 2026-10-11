@@ -387,14 +387,19 @@ async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Pat
         dur_by_job: dict[str, float] = {}
         try:
             metrics = (await client.get(f"{base}/api/metrics", timeout=30)).json()
-            gpu = metrics["system"]["gpu"]
-            proc = metrics["system"]["self_process"]
+            system = metrics.get("system") or {}
+            gpu = system.get("gpu")
+            proc = system.get("self_process") or {}
+            if gpu:  # в контейнере сервера своей nvidia-smi нет — GPU будет у сервиса
+                row.update(
+                    gpu_pct=gpu["utilization_pct"],
+                    vram_used_mb=gpu["vram_used_mb"],
+                    vram_free_mb=gpu["vram_free_mb"],
+                    vram_total_mb=gpu["vram_total_mb"],
+                )
             row.update(
-                gpu_pct=gpu["utilization_pct"],
-                vram_used_mb=gpu["vram_used_mb"],
-                vram_free_mb=gpu["vram_free_mb"],
-                rss_mb=proc["rss_mb"],
-                cpu_pct=proc["cpu_pct"],
+                rss_mb=proc.get("rss_mb"),
+                cpu_pct=proc.get("cpu_pct"),
                 models=[
                     {
                         "model": m.get("model"),
@@ -404,6 +409,33 @@ async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Pat
                     for m in metrics.get("models") or []
                 ],
             )
+            service = metrics.get("asr_service")  # remote-режим: цифры ASR-сервиса
+            if service:
+                row["asr_ok"] = bool(service.get("ok"))
+                if service.get("error"):
+                    row["asr_err"] = str(service["error"])[:140]
+                service_system = service.get("system") or {}
+                service_gpu = service_system.get("gpu")
+                service_proc = service_system.get("self_process") or {}
+                if service_gpu:
+                    row.update(
+                        asr_gpu_pct=service_gpu["utilization_pct"],
+                        asr_vram_used_mb=service_gpu["vram_used_mb"],
+                        asr_vram_free_mb=service_gpu["vram_free_mb"],
+                        asr_vram_total_mb=service_gpu["vram_total_mb"],
+                    )
+                row.update(
+                    asr_cpu_pct=service_proc.get("cpu_pct"),
+                    asr_rss_mb=service_proc.get("rss_mb"),
+                    asr_models=[
+                        {
+                            "model": m.get("model"),
+                            "vram_mb": m.get("vram_mb"),
+                            "busy": m.get("busy"),
+                        }
+                        for m in service.get("models") or []
+                    ],
+                )
         except Exception as exc:  # noqa: BLE001
             row["metrics_err"] = repr(exc)[:140]
         try:
@@ -460,10 +492,13 @@ async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Pat
         except FileNotFoundError:
             pass
         abort = None
+        free_vram = row.get("vram_free_mb")
+        if free_vram is None:
+            free_vram = row.get("asr_vram_free_mb")  # remote: GPU живёт в сервисе
         if health_fail >= 3:
             abort = "сервер не отвечает на /api/health (3 промаха подряд)"
-        elif row.get("vram_free_mb") is not None and row["vram_free_mb"] <= 800:
-            abort = f"VRAM: свободно всего {row['vram_free_mb']} МБ"
+        elif free_vram is not None and free_vram <= 800:
+            abort = f"VRAM: свободно всего {free_vram} МБ"
         elif row.get("loop_lag_max_ms") and row["loop_lag_max_ms"] >= 5000:
             abort = f"event loop вставал на {row['loop_lag_max_ms']} мс"
         elif args.rss_wall and row.get("rss_mb") and row["rss_mb"] >= args.rss_wall:
@@ -471,14 +506,24 @@ async def sample_loop(args, state: dict, client: httpx.AsyncClient, run_dir: Pat
         if abort and not state.get("abort"):
             state["abort"] = f"{abort} (K={state['meetings_started']})"
             print(f"[{ts()}] !!! СТЕНА: {state['abort']}", flush=True)
+        shown_gpu = row.get("gpu_pct")
+        if shown_gpu is None:
+            shown_gpu = row.get("asr_gpu_pct")
+        shown_vram = row.get("vram_used_mb")
+        if shown_vram is None:
+            shown_vram = row.get("asr_vram_used_mb")
         parts = [
             f"[{row['t']}] K={state['meetings_started']:02d} "
             f"говорят={row.get('speakers_active', '?')}",
-            f"GPU {row.get('gpu_pct', '?')}% "
-            f"VRAM {round((row.get('vram_used_mb') or 0) / 1024, 1)}ГБ",
+            f"GPU {shown_gpu if shown_gpu is not None else '?'}% "
+            f"VRAM {round((shown_vram or 0) / 1024, 1)}ГБ",
             f"loop {row.get('loop_lag_ms', '?')}/{row.get('loop_lag_max_ms', '?')}мс",
             f"RSS {round((row.get('rss_mb') or 0) / 1024, 2)}ГБ CPU {row.get('cpu_pct', '?')}%",
         ]
+        if row.get("asr_cpu_pct") is not None or row.get("asr_gpu_pct") is not None:
+            parts.append(
+                f"ASR GPU {row.get('asr_gpu_pct', '?')}% CPU {row.get('asr_cpu_pct', '?')}%"
+            )
         if row.get("rt_factor") is not None:
             parts.append(f"коммит {row.get('committed_total')}с ({row['rt_factor']}x)")
         if row.get("delay_avg") is not None:

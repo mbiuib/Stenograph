@@ -42,9 +42,25 @@ def render(run_dir: Path) -> list[Path]:
 
     xs = [rel(r) for r in rows]
     ks = [r.get("k") or 0 for r in rows]
-    gpu = [r.get("gpu_pct") for r in rows]
+    # В докер-стеке у контейнера сервера нет своей nvidia-smi: тогда GPU-панель
+    # показывает цифры внешнего ASR-сервиса (source уходит в заголовок панели).
+    server_gpu = [r.get("gpu_pct") for r in rows]
+    gpu_source = "сервер" if any(v is not None for v in server_gpu) else "внешний ASR-сервис"
+    gpu = (
+        server_gpu
+        if any(v is not None for v in server_gpu)
+        else [r.get("asr_gpu_pct") for r in rows]
+    )
     rtf = [None if r.get("rt_factor") is None else r["rt_factor"] * 100 for r in rows]
-    vram = [None if r.get("vram_used_mb") is None else r["vram_used_mb"] / 1024 for r in rows]
+    server_vram = [r.get("vram_used_mb") for r in rows]
+    vram_raw = (
+        server_vram
+        if any(v is not None for v in server_vram)
+        else [r.get("asr_vram_used_mb") for r in rows]
+    )
+    vram = [None if v is None else v / 1024 for v in vram_raw]
+    asr_cpu = [r.get("asr_cpu_pct") for r in rows]
+    asr_rss = [r.get("asr_rss_mb") for r in rows]
     d_avg = [r.get("delay_avg") for r in rows]
     d_max = [r.get("delay_max") for r in rows]
     rss = [r.get("rss_mb") for r in rows]
@@ -57,6 +73,8 @@ def render(run_dir: Path) -> list[Path]:
     ax_, av_ = clean(xs, d_avg)
     sx, sv = clean(xs, rss)
     cx, cv = clean(xs, cpu)
+    asx, asv = clean(xs, asr_rss)
+    acx, acv = clean(xs, asr_cpu)
 
     adds: list[tuple[float, int]] = []
     seen = 0
@@ -107,7 +125,8 @@ def render(run_dir: Path) -> list[Path]:
     ax.grid(alpha=0.3)
 
     ax = axes[0][1]
-    ax.plot(gx, gv, color="#3d7dd6", label="GPU %")
+    ax.plot(gx, gv, color="#3d7dd6", label=f"GPU % ({gpu_source})")
+    ax.legend(fontsize=8, loc="lower right", framealpha=1.0)
     ax.set_ylabel("GPU %", color="#3d7dd6")
     ax.set_ylim(0, 105)
     ax2 = ax.twinx()
@@ -118,7 +137,7 @@ def render(run_dir: Path) -> list[Path]:
     for x, k in adds:
         ax.axvline(x, color="#999", ls="--", lw=0.8)
         ax.text(x, 103, f"K={k}", fontsize=7, ha="center", color="#666")
-    ax.set_title(f"GPU: загрузка и видеопамять (пик {vram_peak:.1f} ГБ)")
+    ax.set_title(f"GPU: загрузка и видеопамять (пик {vram_peak:.1f} ГБ; {gpu_source})")
     ax.set_xlabel("минуты от старта")
     ax.grid(alpha=0.3)
 
@@ -139,13 +158,26 @@ def render(run_dir: Path) -> list[Path]:
         ax.axvline(x, color="#999", ls="--", lw=0.8)
 
     ax = axes[1][1]
-    ax.plot(sx, sv, color="#7a4fd6", label="RSS сервера, МБ")
+    lines = [
+        ax.plot(sx, sv, color="#7a4fd6", label="RSS сервера, МБ")[0],
+    ]
+    rss_peak = max([v for v in (rss + asr_rss) if v] or [1000])
     ax.set_ylabel("RSS, МБ", color="#7a4fd6")
-    ax.set_ylim(0, max([v for v in rss if v] or [1000]) * 1.15)
+    ax.set_ylim(0, rss_peak * 1.15)
     ax2 = ax.twinx()
-    ax2.plot(cx, cv, color="#c4552e")
+    lines.append(ax2.plot(cx, cv, color="#c4552e", label="CPU сервера, %")[0])
     ax2.set_ylabel("CPU, % (одно ядро = 100)", color="#c4552e")
-    ax2.set_ylim(0, 220)
+    cpu_peak = max([v for v in (cpu + asr_cpu) if v] or [100]) * 1.15
+    ax2.set_ylim(0, max(cpu_peak, 110))
+    if any(v is not None for v in asr_rss):
+        lines.append(
+            ax.plot(asx, asv, color="#e0a030", ls="--", label="RSS ASR-сервиса, МБ")[0]
+        )
+    if any(v is not None for v in asr_cpu):
+        lines.append(
+            ax2.plot(acx, acv, color="#3d7dd6", ls="--", label="CPU ASR-сервиса, %")[0]
+        )
+    ax.legend(handles=lines, fontsize=8, loc="upper left", framealpha=1.0)
     peak = max(loopmax)
     ax.set_title(f"Ресурсы: RAM/CPU (пик стопора event loop: {peak} мс)")
     ax.set_xlabel("минуты от старта")
