@@ -35,10 +35,12 @@ export function MonitorPage() {
     }
   };
 
-  const gpu = data?.system.gpu ?? null;
+  const service = data?.asr_service ?? null;
+  const gpu = data?.system.gpu ?? service?.system?.gpu ?? null;
   const self = data?.system.self_process ?? null;
   const processes = data?.system.gpu_processes ?? [];
   const models = data?.models ?? [];
+  const serviceModels = service?.models ?? [];
   const live = data?.live ?? null;
   const bridge = data?.bridge ?? null;
   const queue = data?.queue ?? null;
@@ -64,7 +66,7 @@ export function MonitorPage() {
           value={gpu ? fmtMb(gpu.vram_used_mb) : "—"}
           hint={gpu ? `из ${fmtMb(gpu.vram_total_mb)}` : undefined}
         />
-        <StatCard label="Моделей в памяти" value={models.length} />
+        <StatCard label="Моделей в памяти" value={models.length + serviceModels.length} />
         <StatCard label="Эфир" value={data ? airCount : "—"} hint="сессий" />
         <StatCard label="RAM сервера" value={self ? fmtMb(self.rss_mb) : "—"} />
         <StatCard label="CPU сервера" value={self?.cpu_pct != null ? `${self.cpu_pct}%` : "—"} />
@@ -143,8 +145,14 @@ export function MonitorPage() {
             </ul>
           ) : (
             <EmptyState
-              title="Ни одна модель ещё не загружена"
-              hint="Модель загрузится при первой задаче; простаивающие выгружаются автоматически."
+              title={
+                service ? "Локальных моделей нет — они во внешнем ASR-сервисе" : "Ни одна модель ещё не загружена"
+              }
+              hint={
+                service
+                  ? "Сервер в remote-режиме: модели живут в ASR-сервисе — смотри карточку ниже."
+                  : "Модель загрузится при первой задаче; простаивающие выгружаются автоматически."
+              }
             />
           )}
           <div className="mt-3 flex items-center justify-between gap-3 border-t border-edge/60 pt-3">
@@ -163,6 +171,55 @@ export function MonitorPage() {
           </div>
         </Card>
       </div>
+
+      {service && (
+        <Card
+          title={`Внешний ASR-сервис (${
+            serviceModels.length ? `${serviceModels.length} в памяти` : service.ok ? "на связи" : "недоступен"
+          })`}
+        >
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-3 text-xs text-muted">
+              <span className="truncate">{service.url}</span>
+              <span className={service.ok ? "text-accent" : "text-err"}>
+                {service.ok ? "на связи" : `недоступен${service.error ? `: ${service.error}` : ""}`}
+              </span>
+            </div>
+            {serviceModels.length > 0 ? (
+              <ul className="flex flex-col gap-3">
+                {serviceModels.map((model) => (
+                  <li
+                    key={`svc:${model.engine}:${model.model}`}
+                    className="flex flex-col gap-1.5 border-b border-edge/60 pb-3 last:border-0 last:pb-0"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="truncate text-sm font-medium">
+                        {model.engine}: <span className="text-muted">{model.model}</span>
+                      </span>
+                      {model.busy || (model.idle_sec != null && model.idle_sec < 30) ? (
+                        <span className="shrink-0 text-xs text-accent">в работе</span>
+                      ) : (
+                        <span className="shrink-0 text-xs text-muted">простой {fmtIdle(model.idle_sec)}</span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Chip>VRAM: {fmtMb(model.vram_mb)}</Chip>
+                      <Chip>RAM: {fmtMb(model.ram_mb)}</Chip>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              service.ok && (
+                <EmptyState
+                  title="Модели ещё не загружены"
+                  hint="Загрузятся при первой задаче; кнопка «Выгрузить простаивающие» работает через сервис."
+                />
+              )
+            )}
+          </div>
+        </Card>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title={`Эфир (${airCount})`}>

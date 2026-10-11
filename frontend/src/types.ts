@@ -199,6 +199,24 @@ export interface ModelMemory {
   busy?: boolean;
 }
 
+export interface AsrServiceMetrics {
+  url: string;
+  ok: boolean;
+  error?: string;
+  system?: {
+    gpu: MetricsGpu | null;
+    self_process: {
+      pid: number;
+      rss_mb: number | null;
+      commit_mb: number | null;
+      cpu_pct: number | null;
+      vram_mb: number | null;
+    };
+  };
+  models?: ModelMemory[];
+  engines_loaded?: string[];
+}
+
 export interface MetricsSnapshot {
   ts: string;
   system: {
@@ -218,4 +236,6 @@ export interface MetricsSnapshot {
   queue: QueueSnapshot;
   jobs: Record<string, number>;
   llm: { lm_studio: boolean };
+  /** В remote-режиме — снимок внешнего ASR-сервиса (проксируется сервером). */
+  asr_service?: AsrServiceMetrics | null;
 }

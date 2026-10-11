@@ -14,6 +14,8 @@ from stenograph.asr_client import (
     RemoteAsrClient,
     decode_wav_b64,
     encode_wav_b64,
+    fetch_service_metrics,
+    unload_service_models,
 )
 from stenograph.config import Settings
 from stenograph.domain.errors import JobCancelled
@@ -180,3 +182,26 @@ def test_realtime_factories_go_remote(tmp_path, monkeypatch) -> None:
     assert calls[2] == {"model": "whisper-live", "language": "ru", "windows": 2}
     assert words == [(0.0, 1.0, "ок")]
     assert batch_words == [[(0.0, 1.0, "ок")], [(0.0, 1.0, "ок")]]
+
+
+def test_monitor_helpers_are_best_effort() -> None:
+    """The monitor helpers return structured results and never raise."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(200, json={"ts": "t", "models": [], "system": {}})
+        if request.url.path == "/models/unload":
+            return httpx.Response(200, json={"unloaded": ["moss:big"]})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    data = fetch_service_metrics("http://svc.test", transport=transport)
+    assert data["ok"] is True and data["url"] == "http://svc.test"
+    unload = unload_service_models("http://svc.test", transport=transport)
+    assert unload == {"unloaded": ["moss:big"], "ok": True}
+
+    def broken(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    down = fetch_service_metrics("http://svc.test", transport=httpx.MockTransport(broken))
+    assert down["ok"] is False and "500" in down["error"]

@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import __version__, loopwatch, metrics, model_budget
+from ..asr_client import fetch_service_metrics, unload_service_models
 from ..audio import (
     ensure_mix,
     existing_tracks,
@@ -430,6 +431,10 @@ def create_app(
         busy = model_budget.busy_models()
         for row in snapshot.get("models", []):
             row["busy"] = (row.get("engine"), row.get("model")) in busy
+        if settings.asr_backend == "remote":
+            # Remote mode: the models live in the ASR service — proxy its
+            # snapshot so the monitor is not blind (best-effort, quick).
+            snapshot["asr_service"] = fetch_service_metrics(settings.asr_url)
         return snapshot
 
     @app.post("/api/models/unload")
@@ -437,8 +442,15 @@ def create_app(
         """Unload idle ASR models now (frees VRAM/RAM); busy ones are kept.
 
         The manual path works even when MEETSCRIBE_MODEL_IDLE_UNLOAD_SEC=0
-        (automatic eviction off).
+        (automatic eviction off). In remote mode the request is proxied
+        to the ASR service, where the models actually live.
         """
+        if settings.asr_backend == "remote":
+            result = unload_service_models(settings.asr_url)
+            return {
+                "unloaded": result.get("unloaded", []) if result.get("ok") else [],
+                "service": result,
+            }
         return {"unloaded": model_budget.evict_idle(force=True)}
 
     # -- live sessions -------------------------------------------------------

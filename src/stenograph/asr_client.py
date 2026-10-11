@@ -152,3 +152,54 @@ class RemoteAsrClient:
             [(float(start), float(end), str(text)) for start, end, text in words]
             for words in data.get("windows") or []
         ]
+
+def fetch_service_metrics(
+    base_url: str,
+    *,
+    timeout: float = 3.0,
+    transport: httpx.BaseTransport | None = None,
+) -> dict:
+    """Best-effort GET /metrics of the external ASR service; never raises.
+
+    The monitor proxies this snapshot so the page shows the models that
+    actually live in the service process, not the (empty) local registry.
+    """
+    try:
+        with httpx.Client(
+            base_url=base_url.rstrip("/"), timeout=timeout, transport=transport
+        ) as client:
+            response = client.get("/metrics")
+        if response.status_code != 200:
+            return {"url": base_url, "ok": False, "error": f"HTTP {response.status_code}"}
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"url": base_url, "ok": False, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"url": base_url, "ok": False, "error": "неожиданный ответ сервиса"}
+    payload["url"] = base_url
+    payload["ok"] = True
+    return payload
+
+
+def unload_service_models(
+    base_url: str,
+    *,
+    timeout: float = 10.0,
+    transport: httpx.BaseTransport | None = None,
+) -> dict:
+    """Best-effort POST /models/unload of the external ASR service; never raises."""
+    try:
+        with httpx.Client(
+            base_url=base_url.rstrip("/"), timeout=timeout, transport=transport
+        ) as client:
+            response = client.post("/models/unload")
+        if response.status_code != 200:
+            return {"ok": False, "error": f"HTTP {response.status_code}"}
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "неожиданный ответ сервиса"}
+    payload["ok"] = True
+    return payload
+

@@ -24,6 +24,7 @@ import subprocess
 import threading
 import time
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -180,7 +181,19 @@ class _ProcessMemoryCounters(ctypes.Structure):
 def process_memory_mb() -> tuple[float | None, float | None]:
     """(working set, commit) of THIS process in MiB."""
     if os.name != "nt":
-        return None, None
+        # Linux (the docker images): VmRSS stands in for the working set
+        # and VmData is the closest figure to the Windows commit.
+        try:
+            with open("/proc/self/status", encoding="ascii") as handle:
+                fields = {}
+                for line in handle:
+                    key, _, value = line.partition(":")
+                    fields[key] = value.strip()
+            rss_kb = int(fields.get("VmRSS", "").split()[0])
+            data_kb = int(fields.get("VmData", "").split()[0])
+        except (OSError, ValueError, IndexError):
+            return None, None
+        return round(rss_kb / 1024, 1), round(data_kb / 1024, 1)
     pmc = _ProcessMemoryCounters()
     pmc.cb = ctypes.sizeof(_ProcessMemoryCounters)
     try:
@@ -218,13 +231,29 @@ def _cpu_pct() -> float | None:
     return round(100.0 * delta_cpu / delta_wall, 1)
 
 
-def llm_status() -> dict:
-    """Whether the external LLM server (LM Studio) is reachable."""
+def llm_status(base_url: str | None = None) -> dict:
+    """Whether the external LLM server (LM Studio) is reachable.
+
+    The address comes from MEETSCRIBE_LLM_BASE_URL: in the docker stack
+    it is host.docker.internal — LM Studio runs on the host, and
+    127.0.0.1 would be the container itself ("не отвечает" forever).
+    """
+    if base_url is None:
+        from .config import get_settings
+
+        base_url = get_settings().llm_base_url
+    host, port = "127.0.0.1", 1234
+    try:
+        parsed = urlsplit(base_url)
+        host = parsed.hostname or host
+        port = parsed.port or port
+    except ValueError:
+        pass
     reachable = False
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(0.3)
     try:
-        reachable = sock.connect_ex(("127.0.0.1", 1234)) == 0
+        reachable = sock.connect_ex((host, port)) == 0
     except OSError:
         reachable = False
     finally:
@@ -304,6 +333,7 @@ def snapshot(
     bridge: dict | None = None,
     queue: dict | None = None,
     counts: dict | None = None,
+    llm_base_url: str | None = None,
 ) -> dict:
     """Full resource snapshot for the monitor page."""
     gpu = gpu_info()
@@ -340,5 +370,5 @@ def snapshot(
         "bridge": bridge,
         "queue": queue,
         "jobs": counts,
-        "llm": llm_status(),
+        "llm": llm_status() if llm_base_url is None else llm_status(llm_base_url),
     }

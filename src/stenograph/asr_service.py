@@ -13,6 +13,9 @@ Endpoints:
                                    response_format=json|verbose_json (OpenAI)
   POST /v1/realtime/windows      — internal realtime extension: base64 WAV
                                    windows in, word tuples out
+  GET  /metrics                  — resource snapshot (the main server's
+                                   monitor proxies it in remote mode)
+  POST /models/unload            — unload idle engines (frees VRAM/RAM)
 
 The main server switches to this service with MEETSCRIBE_ASR_BACKEND=remote
 and MEETSCRIBE_ASR_URL (see asr_client.py); with the default "local" it keeps
@@ -35,7 +38,7 @@ from tempfile import NamedTemporaryFile
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from . import __version__, model_budget
+from . import __version__, metrics, model_budget
 from .asr_client import decode_wav_b64
 from .config import Settings, get_settings
 from .engines import available_asr, get_asr
@@ -124,6 +127,7 @@ def create_app(
     settings = settings or get_settings()
     settings.ensure_dirs()
     model_budget.configure(settings.model_idle_unload_sec)
+    metrics.prime()  # baseline for the per-model VRAM/RAM deltas
     build = engine_factory or (lambda name: build_default_engine(name, settings))
     pool = EnginePool(build)
 
@@ -226,6 +230,23 @@ def create_app(
                 for words in results
             ]
         }
+
+    @app.get("/metrics")
+    def metrics_snapshot() -> dict:
+        """Resource snapshot of this process (the main server proxies it)."""
+        snap = metrics.snapshot()
+        for key in ("live", "bridge", "queue", "jobs", "llm"):
+            snap.pop(key, None)
+        busy = model_budget.busy_models()
+        for row in snap.get("models", []):
+            row["busy"] = (row.get("engine"), row.get("model")) in busy
+        snap["engines_loaded"] = pool.loaded()
+        return snap
+
+    @app.post("/models/unload")
+    def unload_models() -> dict:
+        """Unload idle engines now (frees VRAM/RAM); busy ones are kept."""
+        return {"unloaded": model_budget.evict_idle(force=True)}
 
     return app
 

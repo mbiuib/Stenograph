@@ -145,6 +145,24 @@ def test_realtime_windows_requires_a_window_capable_engine(client) -> None:
     assert response.status_code == 400
 
 
+def test_metrics_endpoint_reports_engines(client) -> None:
+    """GET /metrics shows the loaded engines (the monitor proxies it)."""
+    test_client, _ = client
+    window = base64.b64encode(_wav_bytes(0.3)).decode("ascii")
+    test_client.post("/v1/realtime/windows", json={"model": "whisper", "windows": [window]})
+    data = test_client.get("/metrics").json()
+    assert "system" in data and "models" in data
+    assert data["engines_loaded"] == ["whisper"]
+    assert "llm" not in data  # that section belongs to the main server
+
+
+def test_unload_endpoint_reports_a_list(client) -> None:
+    """POST /models/unload answers with the unloaded names (may be empty)."""
+    test_client, _ = client
+    data = test_client.post("/models/unload").json()
+    assert data == {"unloaded": []}
+
+
 def test_default_engine_maps_the_live_alias(tmp_path) -> None:
     """The realtime alias builds the LIVE model, not the file-pass one."""
     settings = Settings(data_dir=tmp_path, live_model="large-v3-turbo")
