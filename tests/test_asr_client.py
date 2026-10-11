@@ -176,7 +176,7 @@ def test_realtime_factories_go_remote(tmp_path, monkeypatch) -> None:
     words = factory("ru")(_tone(1.0))
     batch_words = batch_factory("ru")([_tone(0.5), _tone(0.5)])
     assert calls[0]["base_url"] == "http://recorder.test:9"
-    assert calls[1] == {"model": "whisper", "language": "ru", "windows": 1}
-    assert calls[2] == {"model": "whisper", "language": "ru", "windows": 2}
+    assert calls[1] == {"model": "whisper-live", "language": "ru", "windows": 1}
+    assert calls[2] == {"model": "whisper-live", "language": "ru", "windows": 2}
     assert words == [(0.0, 1.0, "ок")]
     assert batch_words == [[(0.0, 1.0, "ок")], [(0.0, 1.0, "ок")]]

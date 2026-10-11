@@ -89,6 +89,33 @@ def _text_of(result: AsrResult) -> str:
     return "\n".join(lines)
 
 
+LIVE_ENGINE_NAME = "whisper-live"
+
+
+def advertised_engines() -> list[str]:
+    """Engine names this service answers to (registry + the live alias)."""
+    return sorted([*available_asr(), LIVE_ENGINE_NAME])
+
+
+def build_default_engine(name: str, settings: Settings) -> AsrEngine:
+    """Build a service engine: registry engines + the realtime turbo alias.
+
+    Realtime window batches speak the LIVE (turbo) model: at the same
+    caption latency it decodes several times faster than the big
+    file-pass model, which matters when many meetings share the service.
+    """
+    if name == LIVE_ENGINE_NAME:
+        from .engines.whisper import FasterWhisperEngine
+
+        return FasterWhisperEngine(
+            model=settings.live_model,
+            models_dir=settings.models_dir,
+            device=settings.device,
+            compute_type=settings.compute_type,
+        )
+    return get_asr(name, settings)
+
+
 def create_app(
     settings: Settings | None = None,
     engine_factory: Callable[[str], AsrEngine] | None = None,
@@ -97,7 +124,7 @@ def create_app(
     settings = settings or get_settings()
     settings.ensure_dirs()
     model_budget.configure(settings.model_idle_unload_sec)
-    build = engine_factory or (lambda name: get_asr(name, settings))
+    build = engine_factory or (lambda name: build_default_engine(name, settings))
     pool = EnginePool(build)
 
     app = FastAPI(title="Стенограф ASR", version=__version__)
@@ -110,7 +137,7 @@ def create_app(
         return {
             "status": "ok",
             "version": __version__,
-            "engines": available_asr(),
+            "engines": advertised_engines(),
             "loaded": pool.loaded(),
         }
 
@@ -121,7 +148,7 @@ def create_app(
             "object": "list",
             "data": [
                 {"id": name, "object": "model", "owned_by": "stenograph"}
-                for name in available_asr()
+                for name in advertised_engines()
             ],
         }
 

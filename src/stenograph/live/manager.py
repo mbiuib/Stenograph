@@ -101,7 +101,7 @@ def _remote_engine_bundle(
     The realtime path always speaks whisper on the service side; the model
     lives there, this process only marshals audio windows over HTTP.
     """
-    from ..asr_client import RemoteAsrClient
+    from ..asr_client import REALTIME_MODEL, RemoteAsrClient
 
     key = ("remote", settings.asr_url, "", "")
     with _ENGINE_FACTORIES_LOCK:
@@ -111,14 +111,18 @@ def _remote_engine_bundle(
 
             def factory(language: str | None) -> WindowTranscriber:
                 def transcribe(audio: np.ndarray) -> list[WindowWord]:
-                    results = client.transcribe_windows([audio], model="whisper", language=language)
+                    results = client.transcribe_windows(
+                        [audio], model=REALTIME_MODEL, language=language
+                    )
                     return results[0] if results else []
 
                 return transcribe
 
             def batch_factory(language: str | None) -> BatchWindowTranscriber:
                 def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
-                    return client.transcribe_windows(windows, model="whisper", language=language)
+                    return client.transcribe_windows(
+                        windows, model=REALTIME_MODEL, language=language
+                    )
 
                 return transcribe
 

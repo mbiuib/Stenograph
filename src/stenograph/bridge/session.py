@@ -13,8 +13,9 @@ import queue
 import threading
 import time
 import wave
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,8 @@ class _Participant:
     last_frame: float = 0.0  # monotonic time of the last fed frame
     next_offset: float = 0.0  # session second the next written sample goes to
     tracker_fed: float = 0.0  # audio seconds already handed to the tracker
+    queued_write_samples: int = 0  # audio queued for the writer, not yet on disk
+    write_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class _ParticipantStream:
@@ -193,6 +196,13 @@ class MeetingSession:
         self._budget_log_at = 0.0  # last global-budget drop warning for this meeting
         self._segments: list[Segment] = []
         self._out: queue.Queue[str] = queue.Queue()
+        # Audio files are written by a dedicated thread: the event loop used
+        # to do it inline, and on a slow filesystem (a Docker bind mount is
+        # ~40x slower per small write than a local disk) the loop fell
+        # behind every incoming frame and stalled for minutes.
+        self._write_queue: deque[tuple[_Participant, np.ndarray | float]] = deque()
+        self._write_cond = threading.Condition()
+        self._writer_stop = False
         self._closed = threading.Event()
         self._stop_event = threading.Event()
         self._started_monotonic = time.monotonic()
@@ -207,6 +217,12 @@ class MeetingSession:
             daemon=True,
         )
         self._worker.start()
+        self._writer = threading.Thread(
+            target=self._writer_loop,
+            name=f"stenograph-jitsi-writer-{meeting_id[:8]}",
+            daemon=True,
+        )
+        self._writer.start()
         log.info("jitsi bridge: сессия %s запущена (задача %s)", meeting_id, self.job.id)
 
     def status(self) -> dict:
@@ -226,7 +242,11 @@ class MeetingSession:
                             for segment in self._segments
                             if segment.speaker == participant.label
                         ),
-                        "audio_sec": round(_written_seconds(participant.writer), 1),
+                        "audio_sec": round(
+                            _written_seconds(participant.writer)
+                            + participant.queued_write_samples / SAMPLE_RATE,
+                            1,
+                        ),
                         "last_frame_sec": round(now - last_frame, 1) if last_frame else None,
                     }
                 )
@@ -338,9 +358,78 @@ class MeetingSession:
             # guard there — adopting under the lock deadlocks the event loop
             # (S→G vs G→S). The pool may only serve the participant after this.
             self._adopt_participant(participant)
-        if silence_sec:
-            self._write_silence(participant, silence_sec)
-        self._write_audio(participant, audio)
+        self._enqueue_audio(participant, silence_sec, audio)
+
+    # -- audio files (dedicated writer thread) ---------------------------------
+
+    def _enqueue_audio(
+        self, participant: _Participant, silence_sec: float, audio: np.ndarray
+    ) -> None:
+        """Hand one frame (and its preceding silence) to the writer thread.
+
+        Runs in the event loop: only queue bookkeeping happens here — no
+        file I/O at all. The writer coalesces each participant's queued
+        frames into one write per drain cycle, shrinking the slow-filesystem
+        cost per frame by an order of magnitude.
+        """
+        with participant.write_lock:
+            participant.queued_write_samples += audio.size
+            if silence_sec:
+                participant.queued_write_samples += int(silence_sec * SAMPLE_RATE)
+        with self._write_cond:
+            if silence_sec:
+                self._write_queue.append((participant, silence_sec))
+            self._write_queue.append((participant, audio))
+            self._write_cond.notify()
+
+    def _writer_loop(self) -> None:
+        """Drain the write queue in order until the session is finalized."""
+        while True:
+            with self._write_cond:
+                if not self._write_queue and not self._writer_stop:
+                    self._write_cond.wait(0.1)
+                batch = list(self._write_queue)
+                self._write_queue.clear()
+                if not batch and self._writer_stop:
+                    return
+            if batch:
+                self._write_batch(batch)
+
+    def _write_batch(
+        self, batch: list[tuple[_Participant, np.ndarray | float]]
+    ) -> None:
+        """Write one drain cycle: per-participant order kept, frames merged."""
+        grouped: dict[int, tuple[_Participant, list[np.ndarray]]] = {}
+        order: list[int] = []
+        for participant, payload in batch:
+            key = id(participant)
+            entry = grouped.get(key)
+            if entry is None:
+                entry = (participant, [])
+                grouped[key] = entry
+                order.append(key)
+            if isinstance(payload, np.ndarray):
+                entry[1].append(payload)
+            else:
+                entry[1].extend(_silence_blocks(payload))
+        for key in order:
+            participant, chunks = grouped[key]
+            samples = sum(chunk.size for chunk in chunks)
+            if not samples:
+                continue
+            merged = chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+            self._write_audio(participant, merged)
+            with participant.write_lock:
+                participant.queued_write_samples = max(
+                    0, participant.queued_write_samples - samples
+                )
+
+    def _stop_writer(self) -> None:
+        """Drain everything still queued and stop the writer thread."""
+        with self._write_cond:
+            self._writer_stop = True
+            self._write_cond.notify_all()
+        self._writer.join(timeout=60.0)
 
     @staticmethod
     def _write_audio(participant: _Participant, audio: np.ndarray) -> None:
@@ -765,6 +854,7 @@ class MeetingSession:
         self._repo.save(self.job)
 
     def _finish(self) -> None:
+        self._stop_writer()
         self._close_writers()
         duration = time.monotonic() - self._started_monotonic
         self._persist()
@@ -820,6 +910,7 @@ class MeetingSession:
             log.exception("jitsi bridge: не удалось запустить улучшение записи %s", self.job.id)
 
     def _fail(self, reason: str) -> None:
+        self._stop_writer()
         self._close_writers()
         self.job.status = JobStatus.ERROR
         self.job.error = reason

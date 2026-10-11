@@ -701,3 +701,35 @@ def test_jitsi_idle_watchdog_can_be_disabled(tmp_path: Path) -> None:
     )
     jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
     assert "stop_reason" not in jobs[0].meta, jobs[0].meta  # обычный конец — без причины
+
+def test_jitsi_audio_is_written_by_the_writer_thread(tmp_path: Path) -> None:
+    """Frames reach the participant WAV via the session's writer thread.
+
+    The write path used to run inline in the event loop; content and order
+    must survive the move to the dedicated writer (which coalesces frames).
+    """
+    client, repo = _make_stack(tmp_path)
+    frames = [frame("p1", "ru-RU", encoded_chunk(10 + index)) for index in range(3)]
+    with client.websocket_connect("/ws/room-writer") as websocket:
+        for data in frames:
+            websocket.send_bytes(data)
+        websocket.send_bytes(b"\x00")
+
+    def meeting() -> Any:
+        jobs = [job for job in repo.list_jobs() if job.kind == "jitsi"]
+        return jobs[0] if jobs else None
+
+    assert _wait_until(lambda: meeting() is not None and meeting().status == "done"), (
+        "встреча не финализировалась"
+    )
+    found = meeting()
+    assert found is not None
+    audio_file = tmp_path / "jitsi" / found.id / "p1.wav"
+    assert _wait_until(audio_file.is_file)
+
+    with wave.open(str(audio_file), "rb") as reader:
+        written = np.frombuffer(reader.readframes(reader.getnframes()), dtype="<i2")
+    sent = np.concatenate([np.frombuffer(data[60:], dtype="<i2") for data in frames])
+    assert written.shape == sent.shape, "writer потерял или продублировал кадры"
+    assert int(np.abs(written.astype("int32") - sent.astype("int32")).max()) <= 1
+

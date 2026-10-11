@@ -11,8 +11,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fakes import FakeEngine, speech_audio
-from stenograph.asr_service import create_app
+from stenograph.asr_service import build_default_engine, create_app
 from stenograph.config import Settings
+from stenograph.engines.whisper import FasterWhisperEngine
 
 
 class FakeWindowEngine(FakeEngine):
@@ -60,7 +61,7 @@ def test_health_and_models(client) -> None:
     health = test_client.get("/health").json()
     assert health["status"] == "ok"
     ids = [item["id"] for item in test_client.get("/v1/models").json()["data"]]
-    assert "whisper" in ids and "moss" in ids
+    assert "whisper" in ids and "moss" in ids and "whisper-live" in ids
 
 
 def test_transcribe_json_uses_the_requested_engine(client) -> None:
@@ -142,3 +143,11 @@ def test_realtime_windows_requires_a_window_capable_engine(client) -> None:
         },
     )
     assert response.status_code == 400
+
+
+def test_default_engine_maps_the_live_alias(tmp_path) -> None:
+    """The realtime alias builds the LIVE model, not the file-pass one."""
+    settings = Settings(data_dir=tmp_path, live_model="large-v3-turbo")
+    engine = build_default_engine("whisper-live", settings)
+    assert isinstance(engine, FasterWhisperEngine)
+    assert engine.model_id == "large-v3-turbo"
