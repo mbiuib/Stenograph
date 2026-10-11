@@ -8,6 +8,7 @@ caption messages (partial/final JSON) are queued for the websocket sender.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import queue
 import threading
@@ -48,6 +49,15 @@ def _silence_blocks(seconds: float) -> list[np.ndarray]:
         blocks.append(np.zeros(size, dtype=np.float32))
         remaining -= size / SAMPLE_RATE
     return blocks
+
+
+def _on_event_loop() -> bool:
+    """True when the calling thread is a running asyncio event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def _safe_name(participant_id: str) -> str:
@@ -919,8 +929,18 @@ class MeetingSession:
         self._bus.publish(self.job.id, {"type": "error", "message": reason})
 
     def stop(self) -> None:
-        """Signal the worker to flush everything and finalize (idempotent)."""
+        """Signal the worker to flush everything and finalize (idempotent).
+
+        The join is skipped when called from the event loop: under load a
+        finalize legitimately runs for minutes (the finalize gate + a slow
+        external ASR), and a 60 s join inside the loop froze the whole
+        server — health, UI and every other meeting — with it. The worker
+        finishes in the background either way; callers that truly need it
+        done use wait_finished() from a worker thread.
+        """
         self._stop_event.set()
+        if _on_event_loop():
+            return
         if self._worker.is_alive():
             self._worker.join(timeout=60.0)
         if self._worker.is_alive():  # pragma: no cover

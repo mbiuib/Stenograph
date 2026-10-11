@@ -690,7 +690,12 @@ def create_app(
                     log.info("jitsi bridge: websocket отключён (%s)", meeting_id)
                 await anyio.to_thread.run_sync(session.stop)
         finally:
-            bridge.end(meeting_id, session)
+            # Off the loop: end() stops the session, and a slow finalize must
+            # never block the event loop (the whole server would freeze).
+            # Shielded: the task is often being cancelled here (client gone),
+            # and a cancelled coroutine must still deregister the meeting.
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(bridge.end, meeting_id, session)
             log.info("jitsi bridge: сессия закрыта (%s)", meeting_id)
 
     # -- static frontend (built by Vite into <repo>/frontend/dist) ----------

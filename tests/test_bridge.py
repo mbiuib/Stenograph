@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import wave
@@ -732,4 +733,37 @@ def test_jitsi_audio_is_written_by_the_writer_thread(tmp_path: Path) -> None:
     sent = np.concatenate([np.frombuffer(data[60:], dtype="<i2") for data in frames])
     assert written.shape == sent.shape, "writer потерял или продублировал кадры"
     assert int(np.abs(written.astype("int32") - sent.astype("int32")).max()) <= 1
+
+def test_session_stop_does_not_block_the_event_loop(tmp_path: Path) -> None:
+    """stop() from the loop must not join a slow worker (it froze uvicorn).
+
+    A finalize takes minutes under load; the handler's teardown used to join
+    the worker (60 s per meeting) right in the event loop, freezing health,
+    the UI and every other meeting with it.
+    """
+    settings = Settings(data_dir=tmp_path)
+    settings.ensure_dirs()
+    session = MeetingSession(
+        "room-loop",
+        settings,
+        JobRepository(settings.db_path),
+        EventBus(),
+        lambda language: PositionTranscriber(),
+    )
+    try:
+        slow = threading.Thread(target=lambda: time.sleep(2.0), daemon=True)
+        slow.start()
+        session._worker = slow  # a worker that would cost the full join
+
+        async def on_loop() -> float:
+            start = time.monotonic()
+            session.stop()
+            return time.monotonic() - start
+
+        elapsed = asyncio.run(on_loop())
+        assert elapsed < 0.5, f"stop() держал event loop {elapsed:.1f} с"
+        assert session.stop_requested, "стоп всё равно должен быть запрошен"
+    finally:
+        session.request_stop("manual")
+        slow.join(timeout=5)
 
