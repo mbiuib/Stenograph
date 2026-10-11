@@ -173,3 +173,12 @@ export function IconChevron(props: IconProps) {
     </Svg>
   );
 }
+
+export function IconSettings(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2.5v2.2m0 14.6v2.2M21.5 12h-2.2m-14.6 0H2.5m16.2-6.7-1.6 1.6M7.1 17.1l-1.6 1.6m0-13.4 1.6 1.6m8.2 8.2 1.6 1.6" />
+    </Svg>
+  );
+}

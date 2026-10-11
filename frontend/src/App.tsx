@@ -7,6 +7,7 @@ import { JitsiPage } from "./pages/JitsiPage";
 import { LivePage } from "./pages/LivePage";
 import { MonitorPage } from "./pages/MonitorPage";
 import { NewJobPage } from "./pages/NewJobPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 export function App() {
   return (
@@ -19,6 +20,7 @@ export function App() {
         <Route path="/jobs" element={<JobsPage />} />
         <Route path="/jobs/new" element={<NewJobPage />} />
         <Route path="/jobs/:id" element={<JobDetailPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

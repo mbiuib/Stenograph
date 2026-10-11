@@ -2,7 +2,15 @@ import { useSyncExternalStore } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { useNow } from "../hooks";
 import { getLiveSession, subscribeLiveSession } from "../live/session";
-import { IconDashboard, IconGauge, IconJobs, IconMic, IconPlus, IconVideo } from "./Icons";
+import {
+  IconDashboard,
+  IconGauge,
+  IconJobs,
+  IconMic,
+  IconPlus,
+  IconSettings,
+  IconVideo,
+} from "./Icons";
 
 export function Layout() {
   const live = useSyncExternalStore(subscribeLiveSession, getLiveSession);
@@ -67,10 +75,17 @@ export function Layout() {
             </Link>
           )}
         </nav>
-        <div className="mt-auto hidden px-1 text-xs text-muted md:block">
-          <a className="hover:text-ink" href="/docs" target="_blank" rel="noreferrer">
-            API (Swagger) ↗
-          </a>
+        {/* Настройки — НЕ рядом с основным меню, внизу: случайно не нажмёшь. */}
+        <div className="mt-auto flex flex-col gap-1 pt-6">
+          <NavLink to="/settings" className={linkClass}>
+            <IconSettings className="size-5 shrink-0" />
+            <span className="hidden md:block">Настройки</span>
+          </NavLink>
+          <div className="hidden px-1 pt-2 text-xs text-muted md:block">
+            <a className="hover:text-ink" href="/docs" target="_blank" rel="noreferrer">
+              API (Swagger) ↗
+            </a>
+          </div>
         </div>
       </aside>
       <main className="ml-16 w-full px-4 py-6 md:ml-60 md:px-8">

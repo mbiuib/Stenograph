@@ -9,6 +9,8 @@ import type {
   LiveStatus,
   MetricsSnapshot,
   QueueSnapshot,
+  SettingsPatchResult,
+  SettingsSnapshot,
   Stats,
 } from "./types";
 
@@ -82,6 +84,22 @@ export const api = {
   engines: (): Promise<EngineList> => request<EngineList>("/api/engines"),
   config: (): Promise<AppConfig> => request<AppConfig>("/api/config"),
   metrics: (): Promise<MetricsSnapshot> => request<MetricsSnapshot>("/api/metrics"),
+
+  settings: (): Promise<SettingsSnapshot> => request<SettingsSnapshot>("/api/settings"),
+
+  updateSettings: (values: Record<string, unknown>): Promise<SettingsPatchResult> =>
+    request<SettingsPatchResult>("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    }),
+
+  resetSetting: (key: string): Promise<SettingsPatchResult> =>
+    request<SettingsPatchResult>("/api/settings/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    }),
 
   unloadModels: (): Promise<{ unloaded: string[] }> =>
     request<{ unloaded: string[] }>("/api/models/unload", { method: "POST" }),

@@ -217,6 +217,41 @@ export interface AsrServiceMetrics {
   engines_loaded?: string[];
 }
 
+export interface SettingItem {
+  key: string;
+  label: string;
+  kind: "bool" | "int" | "float" | "str" | "secret";
+  hint: string;
+  /** Когда вступит в силу: сразу / к новым задачам / после перезапуска. */
+  applies: "live" | "next" | "restart";
+  editable: boolean;
+  minimum: number | null;
+  maximum: number | null;
+  choices: string[] | null;
+  value: string | number | boolean | null;
+  default_value: string | number | boolean | null;
+  source: "default" | "env" | "runtime";
+  /** Для секретов: задано ли значение (само значение не приходит). */
+  is_set?: boolean | null;
+}
+
+export interface SettingGroup {
+  id: string;
+  title: string;
+  description: string;
+  items: SettingItem[];
+}
+
+export interface SettingsSnapshot {
+  groups: SettingGroup[];
+}
+
+export interface SettingsPatchResult {
+  applied: Record<string, unknown>;
+  errors: Record<string, string>;
+  settings: SettingsSnapshot;
+}
+
 export interface MetricsSnapshot {
   ts: string;
   system: {
@@ -227,6 +262,7 @@ export interface MetricsSnapshot {
       commit_mb: number | null;
       cpu_pct: number | null;
       vram_mb: number | null;
+      uptime_sec?: number | null;
     };
     gpu_processes: GpuProcess[] | null;
   };
@@ -238,4 +274,10 @@ export interface MetricsSnapshot {
   llm: { lm_studio: boolean };
   /** В remote-режиме — снимок внешнего ASR-сервиса (проксируется сервером). */
   asr_service?: AsrServiceMetrics | null;
+  /** Цифры самого процесса сервера: версия, отставание event loop. */
+  server?: {
+    version: string;
+    loop_lag_ms: number;
+    loop_lag_max_ms: number;
+  };
 }
