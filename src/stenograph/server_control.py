@@ -33,9 +33,16 @@ def in_container() -> bool:
 
 
 def restart_argv() -> list[str]:
-    """Командная строка для re-exec — та же, которой запущен процесс."""
+    """Команда перезапуска — та же, но через ``sys.executable``.
+
+    У uv-venv на Windows ``orig_argv[0]`` — БАЗОВЫЙ python без контекста
+    venv (шим подменяет argv при запуске), и re-exec им теряет пакеты
+    (``ModuleNotFoundError: stenograph``). ``sys.executable`` в этом случае —
+    сам шим, который восстанавливает site-packages и editable-пакеты.
+    """
     argv = [str(part) for part in (getattr(sys, "orig_argv", None) or [])]
     if argv:
+        argv[0] = sys.executable
         return argv
     return [sys.executable, *sys.argv]
 

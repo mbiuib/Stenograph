@@ -66,6 +66,24 @@ def test_schedule_restart_fires_exactly_once(monkeypatch) -> None:
         server_control._scheduled.clear()
 
 
+def test_restart_argv_uses_sys_executable(monkeypatch) -> None:
+    """У uv-venv orig_argv[0] — базовый python; берём sys.executable (шим)."""
+    monkeypatch.setattr(
+        server_control.sys,
+        "orig_argv",
+        ["C:/base/Python312/python.exe", "-m", "uvicorn", "stenograph.api.app:create_app"],
+    )
+    monkeypatch.setattr(
+        server_control.sys, "executable", "C:/repo/.venv/Scripts/python.exe"
+    )
+    assert server_control.restart_argv() == [
+        "C:/repo/.venv/Scripts/python.exe",
+        "-m",
+        "uvicorn",
+        "stenograph.api.app:create_app",
+    ]
+
+
 def test_restart_argv_falls_back_to_sys_argv(monkeypatch) -> None:
     """Если интерпретатор не дал orig_argv — берём sys.argv как есть."""
     monkeypatch.setattr(server_control.sys, "orig_argv", [], raising=False)
