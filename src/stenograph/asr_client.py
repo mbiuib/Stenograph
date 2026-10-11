@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 
+from .domain.errors import JobCancelled
 from .domain.models import Segment
 from .engines.base import AsrResult
 from .live.streamer import WindowWord
@@ -84,22 +85,33 @@ class RemoteAsrClient:
         model: str,
         language: str | None = None,
         timeout: float | None = None,
+        request_id: str | None = None,
     ) -> AsrResult:
-        """Upload one audio file and parse the verbose_json reply."""
+        """Upload one audio file and parse the verbose_json reply.
+
+        ``request_id`` lets the caller abort this very request through
+        :meth:`cancel_transcription`; the service then answers 409,
+        which surfaces as :class:`JobCancelled`.
+        """
+        data: dict[str, str] = {
+            "model": model,
+            "language": language or "",
+            "response_format": "verbose_json",
+        }
+        if request_id:
+            data["request_id"] = request_id
         try:
             with open(audio_path, "rb") as handle:
                 response = self._http.post(
                     "/v1/audio/transcriptions",
                     files={"file": (Path(audio_path).name, handle, "application/octet-stream")},
-                    data={
-                        "model": model,
-                        "language": language or "",
-                        "response_format": "verbose_json",
-                    },
+                    data=data,
                     timeout=timeout or self._file_timeout,
                 )
         except httpx.HTTPError as exc:
             raise AsrServiceError(f"ASR service unreachable: {exc}") from exc
+        if response.status_code == 409:
+            raise JobCancelled()
         if response.status_code != 200:
             raise AsrServiceError(
                 f"ASR service error {response.status_code}: {response.text[:300]}"
@@ -120,6 +132,29 @@ class RemoteAsrClient:
             duration=float(payload.get("duration") or 0.0),
             segments=segments,
         )
+
+    def cancel_transcription(self, request_id: str, *, timeout: float = 5.0) -> bool:
+        """Ask the service to abort an in-flight transcription (best-effort).
+
+        The service stops at its next engine checkpoint and answers the
+        original request with 409; an unknown or already finished id is a
+        harmless no-op (older services without the endpoint just return
+        False).
+        """
+        try:
+            response = self._http.post(
+                "/v1/transcriptions/cancel",
+                json={"request_id": request_id},
+                timeout=timeout,
+            )
+        except httpx.HTTPError:
+            return False
+        if response.status_code != 200:
+            return False
+        try:
+            return bool(response.json().get("cancelled"))
+        except ValueError:
+            return False
 
     def transcribe_windows(
         self,

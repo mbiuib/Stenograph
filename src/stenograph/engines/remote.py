@@ -5,13 +5,17 @@ live in asr_service.py, this process never loads them. The engines registry
 returns this class from make_asr() in remote mode, so every file/reprocess
 job ships its audio over HTTP instead of decoding in-process.
 
-Cancellation is cooperative between calls (an in-flight HTTP request is not
-aborted mid-way); pause_gate is honored before the call only, since the
-upload is one shot.
+Cancellation is cooperative AND reaches through the service: a watcher
+thread polls ``is_cancelled`` and aborts the in-flight request by its id
+(POST /v1/transcriptions/cancel), so a long MOSS run stops at its next
+generated token instead of decoding to the end. pause_gate is honored
+before the call only, since the upload is one shot.
 """
 
 from __future__ import annotations
 
+import threading
+import uuid
 from pathlib import Path
 
 from ..asr_client import RemoteAsrClient
@@ -58,9 +62,27 @@ class RemoteAsrEngine:
             raise JobCancelled()
         if pause_gate is not None:
             pause_gate()
-        result = self._client.transcribe_file(
-            audio_path, model=self.name, language=options.language
-        )
+        request_id = uuid.uuid4().hex
+        stopping = threading.Event()
+        if is_cancelled is not None:
+            # Пока сервис считает, следим за флагом: отмена обязана рвать и
+            # удалённый вызов, иначе многоминутный MOSS доситывается целиком.
+            def _watch() -> None:
+                while not stopping.wait(0.5):
+                    if is_cancelled():
+                        self._client.cancel_transcription(request_id)
+                        return
+
+            threading.Thread(target=_watch, name="asr-cancel-watch", daemon=True).start()
+        try:
+            result = self._client.transcribe_file(
+                audio_path,
+                model=self.name,
+                language=options.language,
+                request_id=request_id,
+            )
+        finally:
+            stopping.set()
         if not result.segments:
             raise NoSpeechError(f"{self.name}: речь не найдена (внешний ASR)")
         if on_segment is not None:

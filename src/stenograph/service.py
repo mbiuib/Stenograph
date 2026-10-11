@@ -317,13 +317,52 @@ class TranscriptionService:
         return job
 
     def cancel(self, job_id: str) -> bool:
-        """Request cooperative cancellation; False if the job is not active."""
+        """Request cancellation; a job still in the waiting pool stops now.
+
+        A RUNNING job stops cooperatively: the engines check the event at
+        their checkpoints (MOSS — at every generated token; in remote mode
+        the in-flight request is aborted through the ASR service's cancel
+        endpoint). A job that is still QUEUED would otherwise sit in the
+        pool — showing «не отменяется» — until a worker finally reaches it
+        behind a long run; it is marked cancelled and dropped right here.
+        """
         with self._lock:
             event = self._cancel_events.get(job_id)
+            queued = job_id in self._waiting
         if event is None:
             return False
         event.set()
+        if queued:
+            self._cancel_waiting(job_id)
         return True
+
+    def _cancel_waiting(self, job_id: str) -> None:
+        """Finalize a still-pooled job: cancelled row + out of the pool.
+
+        The event object stays in ``_cancel_events`` on purpose: a worker
+        may be claiming this very job right now — it must observe the SET
+        event (or the cancelled row) instead of a fresh one.
+        """
+        with self._lock:
+            if job_id in self._waiting:
+                self._waiting.remove(job_id)
+        job = self.repo.get(job_id)
+        if job is None or job.status != JobStatus.QUEUED:
+            return
+        job.status = JobStatus.CANCELLED
+        job.message = "Отменено"
+        job.finished_at = time.time()
+        self.repo.save(job)
+        self.bus.publish(
+            job.id,
+            {
+                "type": "status",
+                "status": str(JobStatus.CANCELLED),
+                "message": job.message,
+                "progress": job.progress,
+            },
+        )
+        self.bus.publish(job.id, {"type": "cancelled", "message": job.message})
 
     def get(self, job_id: str) -> Job | None:
         """Fetch a job from the repository."""
@@ -526,6 +565,12 @@ class TranscriptionService:
 
     def _run_job(self, job_id: str, slot: int) -> None:
         job = self.repo.get(job_id)
+        if job is not None and job.status == JobStatus.CANCELLED:
+            # Отменён, пока ждал в пуле (см. cancel → _cancel_waiting).
+            with self._lock:
+                self._cancel_events.pop(job_id, None)
+            log.info("job %s уже отменён до запуска — пропускаю", job_id)
+            return
         with self._lock:
             if job_id in self._waiting:
                 self._waiting.remove(job_id)

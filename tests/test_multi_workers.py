@@ -225,3 +225,34 @@ def test_workers_setting_is_clamped(tmp_path: Path) -> None:
     repo = JobRepository(settings.db_path)
     service = TranscriptionService(settings, repo, EventBus())
     assert service.workers == 8
+
+
+def test_cancel_a_queued_job_is_immediate(tmp_path: Path) -> None:
+    """Отмена ждущей задачи срабатывает сразу, не ждёт освобождения воркера.
+
+    Раньше отмена лишь ставила флаг в памяти: задача оставалась «в очереди»
+    и получала cancelled только когда воркер доходил до неё — за многоминутным
+    MOSS это выглядело как «задача не отменяется». Теперь ждущие задачи
+    финализируются в момент отмены, при живом соседе.
+    """
+    state = _state()
+    service, repo = _make_service(tmp_path, 1, lambda n, s: GatedEngine(state))
+    job_a = service.submit_file(_wav(tmp_path, "a.wav"))
+    job_b = service.submit_file(_wav(tmp_path, "b.wav"))
+    assert _wait(lambda: _job(repo, job_a.id).status == JobStatus.RUNNING), state
+    assert _job(repo, job_b.id).status == JobStatus.QUEUED
+
+    assert service.cancel(job_b.id) is True
+    # Немедленно: cancelled и вне пула — пока job_a всё ещё выполняется.
+    assert _wait(lambda: _job(repo, job_b.id).status == JobStatus.CANCELLED, timeout=3)
+    assert _job(repo, job_a.id).status == JobStatus.RUNNING
+    assert _job(repo, job_b.id).message == "Отменено"
+    waiting_ids = [job.id for job in service.queue_view()["waiting"]]
+    assert job_b.id not in waiting_ids
+
+    state["release"].set()
+    assert _wait(lambda: _job(repo, job_a.id).status == JobStatus.DONE, timeout=10)
+    # Воркер не «догоняет» отменённую задачу после освобождения.
+    assert _job(repo, job_b.id).status == JobStatus.CANCELLED
+    # Движок запускался ровно один раз — отменённую задачу не считали.
+    assert len(state["runs"]) == 1, state["runs"]

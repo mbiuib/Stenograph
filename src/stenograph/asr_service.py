@@ -13,6 +13,8 @@ Endpoints:
                                    response_format=json|verbose_json (OpenAI)
   POST /v1/realtime/windows      — internal realtime extension: base64 WAV
                                    windows in, word tuples out
+  POST /v1/transcriptions/cancel — abort an in-flight transcription by its
+                                   request id (the main server's cancel)
   GET  /metrics                  — resource snapshot (the main server's
                                    monitor proxies it in remote mode)
   POST /models/unload            — unload idle engines (frees VRAM/RAM)
@@ -41,6 +43,7 @@ from pydantic import BaseModel
 from . import __version__, metrics, model_budget
 from .asr_client import decode_wav_b64
 from .config import Settings, get_settings
+from .domain.errors import JobCancelled
 from .engines import available_asr, get_asr
 from .engines.base import AsrEngine, AsrResult, NoSpeechError, TranscribeOptions
 
@@ -82,6 +85,52 @@ class WindowBatch(BaseModel):
     model: str = ""
     language: str | None = None
     windows: list[str]  # each: base64 of a 16 kHz mono int16 WAV
+
+
+class CancelRequest(BaseModel):
+    """POST /v1/transcriptions/cancel: abort a request by its id."""
+
+    request_id: str
+
+
+class CancelRegistry:
+    """In-flight transcription requests of this service (id → cancel event).
+
+    The main server attaches a request id to every upload; to stop a
+    runaway transcription (a cancelled job must not keep the GPU busy for
+    minutes) it POSTs /v1/transcriptions/cancel and the engine raises at
+    its next cooperative checkpoint.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[str, threading.Event] = {}
+
+    def start(self, request_id: str) -> threading.Event:
+        """Register a fresh request; returns its cancel event."""
+        event = threading.Event()
+        with self._lock:
+            self._events[request_id] = event
+        return event
+
+    def finish(self, request_id: str) -> None:
+        """Forget a request that answered (normally or by cancel)."""
+        with self._lock:
+            self._events.pop(request_id, None)
+
+    def cancel(self, request_id: str) -> bool:
+        """Ask the in-flight request to stop; False when it is not running."""
+        with self._lock:
+            event = self._events.get(request_id)
+        if event is None:
+            return False
+        event.set()
+        return True
+
+    def active(self) -> int:
+        """How many transcriptions are being served right now."""
+        with self._lock:
+            return len(self._events)
 
 
 def _text_of(result: AsrResult) -> str:
@@ -130,6 +179,7 @@ def create_app(
     metrics.prime()  # baseline for the per-model VRAM/RAM deltas
     build = engine_factory or (lambda name: build_default_engine(name, settings))
     pool = EnginePool(build)
+    cancels = CancelRegistry()
 
     app = FastAPI(title="Стенограф ASR", version=__version__)
     app.state.settings = settings
@@ -143,6 +193,7 @@ def create_app(
             "version": __version__,
             "engines": advertised_engines(),
             "loaded": pool.loaded(),
+            "active_transcriptions": cancels.active(),
         }
 
     @app.get("/v1/models")
@@ -162,8 +213,14 @@ def create_app(
         model: str = Form(""),
         language: str = Form(""),
         response_format: str = Form("json"),
+        request_id: str = Form(""),
     ) -> dict:
-        """OpenAI-compatible transcription over the registered engines."""
+        """OpenAI-compatible transcription over the registered engines.
+
+        ``request_id`` (our extension) registers the call in the cancel
+        registry: the main server aborts a cancelled job through
+        POST /v1/transcriptions/cancel instead of waiting for the full run.
+        """
         name = model.strip() or settings.engine
         try:
             engine, call_lock = pool.get(name)
@@ -178,11 +235,22 @@ def create_app(
             options = TranscribeOptions(
                 language=None if normalized.lower() in ("", "auto") else normalized
             )
-            with call_lock:
-                try:
-                    result = engine.transcribe(temp, options)
-                except NoSpeechError:
-                    result = AsrResult()
+            cancel_event = cancels.start(request_id) if request_id.strip() else None
+            try:
+                with call_lock:
+                    try:
+                        result = engine.transcribe(
+                            temp,
+                            options,
+                            is_cancelled=cancel_event.is_set if cancel_event else None,
+                        )
+                    except NoSpeechError:
+                        result = AsrResult()
+            except JobCancelled:
+                raise HTTPException(status_code=409, detail="transcription cancelled") from None
+            finally:
+                if cancel_event is not None:
+                    cancels.finish(request_id)
         finally:
             temp.unlink(missing_ok=True)
         text = _text_of(result)
@@ -230,6 +298,11 @@ def create_app(
                 for words in results
             ]
         }
+
+    @app.post("/v1/transcriptions/cancel")
+    def cancel_transcription(payload: CancelRequest) -> dict:
+        """Abort an in-flight transcription; it stops at its next engine checkpoint."""
+        return {"cancelled": cancels.cancel(payload.request_id)}
 
     @app.get("/metrics")
     def metrics_snapshot() -> dict:

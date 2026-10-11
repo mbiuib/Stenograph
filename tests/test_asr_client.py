@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -19,8 +21,9 @@ from stenograph.asr_client import (
 )
 from stenograph.config import Settings
 from stenograph.domain.errors import JobCancelled
+from stenograph.domain.models import Segment
 from stenograph.engines import make_asr
-from stenograph.engines.base import NoSpeechError, TranscribeOptions
+from stenograph.engines.base import AsrResult, NoSpeechError, TranscribeOptions
 from stenograph.engines.remote import RemoteAsrEngine
 from stenograph.engines.whisper import FasterWhisperEngine
 from stenograph.live import manager as live_manager
@@ -205,3 +208,61 @@ def test_monitor_helpers_are_best_effort() -> None:
 
     down = fetch_service_metrics("http://svc.test", transport=httpx.MockTransport(broken))
     assert down["ok"] is False and "500" in down["error"]
+
+
+def test_remote_engine_aborts_the_inflight_request() -> None:
+    """Отмена на сервере доходит до сервиса: сторож шлёт cancel по request_id."""
+    asked = threading.Event()
+    seen: dict[str, str] = {}
+
+    class BlockingClient:
+        """«Сервис»: считает, пока не придёт отмена (или провал через 5 с)."""
+
+        def transcribe_file(self, path, *, model, language=None, request_id=None):
+            seen["request_id"] = request_id
+            if not asked.wait(5):
+                raise AssertionError("отмена не дошла до сервиса")
+            raise JobCancelled()
+
+        def cancel_transcription(self, request_id, **kwargs):
+            seen["cancelled"] = request_id
+            asked.set()
+            return True
+
+    engine = RemoteAsrEngine("whisper", Settings(), client=BlockingClient())
+    flag = threading.Event()
+    timer = threading.Timer(0.3, flag.set)
+    timer.start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(JobCancelled):
+            engine.transcribe(Path("x.wav"), TranscribeOptions(), is_cancelled=flag.is_set)
+        assert time.monotonic() - started < 4
+    finally:
+        timer.cancel()
+    assert seen.get("cancelled") == seen.get("request_id")
+    assert seen.get("request_id")
+
+
+def test_remote_engine_without_flag_runs_to_completion() -> None:
+    """Без is_cancelled сторож не поднимается — обычный путь не меняется."""
+    calls: list[dict] = []
+
+    class UnaryClient:
+        def transcribe_file(self, path, *, model, language=None, request_id=None):
+            calls.append({"model": model, "request_id": request_id})
+            return AsrResult(
+                language="ru",
+                language_probability=0.0,
+                duration=1.0,
+                segments=[
+                    Segment(index=0, start=0.0, end=1.0, text="ок", speaker=None),
+                ],
+            )
+
+    engine = RemoteAsrEngine("whisper", Settings(), client=UnaryClient())
+    result = engine.transcribe(Path("x.wav"), TranscribeOptions())
+    assert [segment.text for segment in result.segments] == ["ок"]
+    # request_id всё равно передаётся (сервис знает запрос), отмены нет.
+    assert calls and calls[0]["request_id"]
+

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import io
+import threading
+import time
 import wave
 from pathlib import Path
 
@@ -13,6 +15,8 @@ from fastapi.testclient import TestClient
 from fakes import FakeEngine, speech_audio
 from stenograph.asr_service import build_default_engine, create_app
 from stenograph.config import Settings
+from stenograph.domain.errors import JobCancelled
+from stenograph.engines.base import AsrResult
 from stenograph.engines.whisper import FasterWhisperEngine
 
 
@@ -169,3 +173,71 @@ def test_default_engine_maps_the_live_alias(tmp_path) -> None:
     engine = build_default_engine("whisper-live", settings)
     assert isinstance(engine, FasterWhisperEngine)
     assert engine.model_id == "large-v3-turbo"
+
+
+def test_cancel_aborts_a_running_transcription(tmp_path: Path) -> None:
+    """POST /v1/transcriptions/cancel обрывает идущую генерацию по request_id."""
+    settings = Settings(data_dir=tmp_path, engine="whisper")
+    settings.ensure_dirs()
+    started = threading.Event()
+
+    class SlowEngine:
+        """«Долгая» модель: считает, пока не отменят (или до таймаута)."""
+
+        name = "slow"
+
+        def transcribe(
+            self,
+            audio_path,
+            options,
+            *,
+            on_progress=None,
+            on_segment=None,
+            is_cancelled=None,
+            pause_gate=None,
+        ):
+            started.set()
+            for _ in range(300):  # до 15 с, если отмену не пробросить
+                if is_cancelled is not None and is_cancelled():
+                    raise JobCancelled()
+                time.sleep(0.05)
+            return AsrResult(language="ru", language_probability=0.0, duration=1.0)
+
+    app = create_app(settings=settings, engine_factory=lambda name: SlowEngine())
+    with TestClient(app) as test_client:
+        result: dict = {}
+
+        def submit() -> None:
+            result["response"] = test_client.post(
+                "/v1/audio/transcriptions",
+                files={"file": ("speech.wav", _wav_bytes(), "audio/wav")},
+                data={"model": "whisper", "request_id": "req-cancel-1"},
+            )
+
+        worker = threading.Thread(target=submit)
+        worker.start()
+        assert started.wait(5), "транскрибация не началась"
+        cancel = test_client.post(
+            "/v1/transcriptions/cancel", json={"request_id": "req-cancel-1"}
+        )
+        assert cancel.status_code == 200
+        assert cancel.json() == {"cancelled": True}
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "отмена не оборвала генерацию"
+        assert result["response"].status_code == 409
+        # Повторная отмена — no-op: запрос уже завершён и снят с реестра.
+        again = test_client.post(
+            "/v1/transcriptions/cancel", json={"request_id": "req-cancel-1"}
+        )
+        assert again.json() == {"cancelled": False}
+
+
+def test_cancel_of_unknown_request_is_false(client) -> None:
+    """Отмена неизвестного/уже завершённого запроса — безвредный false."""
+    test_client, _ = client
+    response = test_client.post(
+        "/v1/transcriptions/cancel", json={"request_id": "nope"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": False}
+
