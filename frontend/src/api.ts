@@ -101,6 +101,9 @@ export const api = {
       body: JSON.stringify({ key }),
     }),
 
+  restartServer: (): Promise<{ ok: boolean; scheduled: boolean }> =>
+    request<{ ok: boolean; scheduled: boolean }>("/api/server/restart", { method: "POST" }),
+
   unloadModels: (): Promise<{ unloaded: string[] }> =>
     request<{ unloaded: string[] }>("/api/models/unload", { method: "POST" }),
 

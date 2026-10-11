@@ -162,18 +162,112 @@ function SettingRow({
   );
 }
 
+type RestartPhase = "idle" | "confirm" | "restarting" | "back" | "error";
+
+async function healthOk(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/health", { cache: "no-store" });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Перезапуск сервера: кнопка, ожидание возврата и версия после старта. */
+function RestartCard({ onRestarted }: { onRestarted: () => Promise<void> }) {
+  const [phase, setPhase] = useState<RestartPhase>("idle");
+  const [note, setNote] = useState<string | null>(null);
+
+  const doRestart = useCallback(async () => {
+    setPhase("restarting");
+    setNote(null);
+    // Сервер отвечает ДО остановки; если соединение успело упасть — тоже ок.
+    await api.restartServer().catch(() => undefined);
+    // Сначала дожидаемся остановки, затем — возвращения.
+    const downDeadline = Date.now() + 30_000;
+    while (Date.now() < downDeadline && (await healthOk())) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    const upDeadline = Date.now() + 120_000;
+    while (Date.now() < upDeadline) {
+      if (await healthOk()) {
+        const info = await fetch("/api/health")
+          .then((response) => response.json() as Promise<{ version?: string }>)
+          .catch(() => null);
+        setNote(
+          info?.version ? `Сервер перезапущен (версия ${info.version}).` : "Сервер перезапущен.",
+        );
+        setPhase("back");
+        await onRestarted();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    setNote("Сервер не ответил за две минуты — проверьте контейнер (docker compose ps).");
+    setPhase("error");
+  }, [onRestarted]);
+
+  return (
+    <Card title="Сервер">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <p className="text-sm text-muted">
+          Перезапуск применяет настройки с пометкой «Применится после перезапуска сервера».
+          Идущие задачи прервутся — при старте их поднимет настройка «Поднимать задачи после
+          рестарта». В докере сервер поднимается сам (политика рестарта).
+        </p>
+        {phase === "restarting" ? (
+          <Chip className="shrink-0 text-warn">Перезагружаю…</Chip>
+        ) : phase === "confirm" ? (
+          <div className="flex shrink-0 gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-bg transition-opacity hover:opacity-90"
+              onClick={() => void doRestart()}
+            >
+              Да, перезапустить
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted transition-colors hover:text-ink"
+              onClick={() => setPhase("idle")}
+            >
+              Отмена
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="shrink-0 rounded-md border border-edge px-3 py-1.5 text-sm text-ink transition-colors hover:border-warn/60 hover:text-warn"
+            onClick={() => setPhase("confirm")}
+          >
+            Перезапустить сервер
+          </button>
+        )}
+      </div>
+      {phase === "back" && note && <p className="mt-1 text-xs text-ok">{note}</p>}
+      {phase === "error" && note && <p className="mt-1 text-xs text-err">{note}</p>}
+    </Card>
+  );
+}
+
 export function SettingsPage() {
   const [data, setData] = useState<SettingsSnapshot | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
-  useEffect(() => {
-    api
-      .settings()
-      .then(setData)
-      .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+  const reload = useCallback(async () => {
+    try {
+      setData(await api.settings());
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    }
   }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
   const apply = useCallback(async (key: string, value: unknown) => {
     setBusyKey(key);
@@ -210,6 +304,8 @@ export function SettingsPage() {
           сказано, когда именно (к новым задачам, сессиям или после перезапуска сервера).
         </p>
       </header>
+
+      <RestartCard onRestarted={reload} />
 
       {loadError && <ErrorBanner message={`Не удалось загрузить настройки: ${loadError}`} />}
       {!data && !loadError && <EmptyState title="Загружаю настройки…" />}

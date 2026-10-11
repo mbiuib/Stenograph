@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import __version__, loopwatch, metrics, model_budget
+from .. import __version__, loopwatch, metrics, model_budget, server_control
 from ..asr_client import fetch_service_metrics, unload_service_models
 from ..audio import (
     ensure_mix,
@@ -444,6 +444,18 @@ def create_app(
         """Return one setting to its environment/default value."""
         result = settings_service.reset(payload.key)
         return {**result, "settings": settings_service.snapshot()}
+
+    @app.post("/api/server/restart")
+    def restart_server() -> dict:
+        """Перезапустить сервер (кнопка в «Настройках»).
+
+        Ответ уходит сразу, перезапуск — через полсекунды: в докере это
+        SIGTERM (контейнер поднимет политика рестарта), нативно — re-exec
+        той же команды. Прерванные задачи поднимет настройка «Поднимать
+        задачи после рестарта».
+        """
+        scheduled = server_control.schedule_restart()
+        return {"ok": True, "scheduled": scheduled}
 
     @app.get("/api/queue")
     def get_queue() -> dict:

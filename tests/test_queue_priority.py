@@ -21,7 +21,7 @@ from stenograph.storage import JobRepository
 
 def _make_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TranscriptionService:
     """A service whose worker thread exits at once (picks are driven manually)."""
-    monkeypatch.setattr(TranscriptionService, "_work_loop", lambda self: None)
+    monkeypatch.setattr(TranscriptionService, "_work_loop", lambda self, slot: None)
     settings = Settings(data_dir=tmp_path)
     settings.ensure_dirs()
     repo = JobRepository(settings.db_path)
