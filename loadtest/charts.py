@@ -185,7 +185,14 @@ def render(run_dir: Path) -> list[Path]:
     ax.set_ylim(0, 1.08)
     ax.grid(alpha=0.3)
     ax = axes2[1]
-    ax.plot(ksorted, [max(per_k[k]["delay"]) for k in ksorted], "o-", color="#d64545")
+    delay_points = [(k, max(per_k[k]["delay"])) for k in ksorted if per_k[k]["delay"]]
+    if delay_points:
+        ax.plot(
+            [k for k, _ in delay_points],
+            [value for _, value in delay_points],
+            "o-",
+            color="#d64545",
+        )
     ax.set_title("Максимальная задержка текста к концу шага")
     ax.set_xlabel("встреч одновременно")
     ax.set_ylabel("с")

@@ -760,7 +760,10 @@ async def main() -> None:
     print(f"время: {summary['elapsed_sec']} с", flush=True)
     for row in summary["jobs"]:
         print(f"  {row['name'][:52]:52} {row['status']:9} сегментов {row['segments']}", flush=True)
-    run_charts(run_dir)
+    try:
+        run_charts(run_dir)
+    except Exception as exc:  # noqa: BLE001 — a broken chart must not fail the report
+        print(f"графики не построились: {exc}", flush=True)
     print(f"папка результатов: {run_dir}", flush=True)
 
 

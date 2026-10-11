@@ -32,10 +32,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e ".[${STENOGRAPH_EXTRAS}]"
 
 # ctranslate2 (faster-whisper) loads cuBLAS/cuDNN at runtime; torch ships its
-# own CUDA, the nvidia-* wheels keep ctranslate2 covered.
+# own CUDA, the nvidia-* wheels keep ctranslate2 covered. The cu13 dir holds
+# nvrtc + nvrtc-builtins: torch's runtime JIT (used by MOSS) dlopens the
+# builtins by plain soname, so the directory must sit on LD_LIBRARY_PATH —
+# without it every moss pass dies with "failed to open libnvrtc-builtins.so.13.0".
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-runtime-cu12
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cu13/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib
 
 # The built React UI (served by the stenograph server container).
 COPY frontend/dist ./frontend/dist
