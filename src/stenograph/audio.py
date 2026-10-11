@@ -39,14 +39,32 @@ def track_kind(job: Job) -> str:
     return "none"
 
 
+def resolve_track_path(path: str | None) -> Path | None:
+    r"""Найти дорожку на диске, терпимо к стилю путей из meta.audio.
+
+    Старые записи (нативный Windows-сервер) хранят пути вида
+    «data\jitsi\<id>\p01.wav»: в docker-сервере обратные слэши —
+    обычные символы имени файла, и файл «не находится». Пробуем путь
+    как есть, затем с нормализованными разделителями.
+    """
+    if not path:
+        return None
+    candidate = Path(path)
+    if candidate.is_file():
+        return candidate
+    normalized = Path(path.replace("\\", "/"))
+    return normalized if normalized.is_file() else None
+
+
 def existing_tracks(job: Job) -> dict[str, str]:
     """``meta.audio`` entries whose files still exist on disk."""
     audio = job.meta.get("audio") or {}
-    return {
-        str(key): str(path)
-        for key, path in audio.items()
-        if isinstance(path, str) and Path(path).is_file()
-    }
+    resolved: dict[str, str] = {}
+    for key, path in audio.items():
+        found = resolve_track_path(path) if isinstance(path, str) else None
+        if found is not None:
+            resolved[str(key)] = str(found)
+    return resolved
 
 
 def _speaker_number(name: str) -> tuple[int, str]:

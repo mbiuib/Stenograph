@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .audio import resolve_track_path
 from .config import Settings
 from .domain.errors import JobCancelled
 from .domain.models import Job, JobStatus, Segment
@@ -221,9 +222,18 @@ def run_reprocess_job(
 
     try:
         job.started_at = time.time()
-        audio = {str(key): str(value) for key, value in (job.meta.get("audio") or {}).items()}
+        raw_audio = job.meta.get("audio") or {}
         declared = job.meta.get("tracks") or ("system", "mic")
-        tracks = [track for track in declared if track in audio]
+        audio: dict[str, str] = {}
+        for track in declared:
+            value = raw_audio.get(track)
+            if value is None:
+                continue
+            found = resolve_track_path(str(value))
+            if found is None:
+                raise FileNotFoundError(f"дорожка не найдена: {value}")
+            audio[track] = str(found)
+        tracks = list(audio)
         if not tracks:
             raise ValueError("у задачи нет дорожек для обработки")
         # Per-track fixed speaker: the live mic is «Вы»; a jitsi file is one

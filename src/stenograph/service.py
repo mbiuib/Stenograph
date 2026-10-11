@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from .audio import resolve_track_path
 from .config import Settings, clean_language, get_settings
 from .domain.models import Job, JobStatus
 from .engines import available_asr, make_asr
@@ -180,15 +181,17 @@ class TranscriptionService:
         """
         if job.kind not in ("live", "jitsi"):
             raise ValueError("улучшение доступно для записей Live и Jitsi")
-        audio = {str(key): str(value) for key, value in (job.meta.get("audio") or {}).items()}
+        # Пути нормализуются (старые записи хранят «data\\jitsi\\…»):
+        # ребёнок получает уже найденные пути, а не сырые строки из meta.
+        audio: dict[str, str] = {}
+        for key, value in (job.meta.get("audio") or {}).items():
+            found = resolve_track_path(str(value))
+            if found is not None:
+                audio[str(key)] = str(found)
         if job.kind == "live":
-            tracks = [
-                track
-                for track in ("system", "mic")
-                if audio.get(track) and Path(audio[track]).is_file()
-            ]
+            tracks = [track for track in ("system", "mic") if audio.get(track)]
         else:
-            tracks = [label for label, path in audio.items() if label and Path(path).is_file()]
+            tracks = [label for label in audio if label]
         if not tracks:
             raise ValueError("у записи нет сохранённых дорожек")
         return audio, tracks

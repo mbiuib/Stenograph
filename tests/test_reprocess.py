@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from stenograph.api.app import create_app
+from stenograph.audio import resolve_track_path
 from stenograph.config import Settings
 from stenograph.domain.models import Job, JobStatus, Segment
 from stenograph.engines.base import AsrResult, NoSpeechError, TranscribeOptions, TranscribeProgress
@@ -348,3 +349,21 @@ def test_reprocess_all_tracks_speechless_is_done(tmp_path: Path) -> None:
     assert job.meta["no_speech"] is True
     assert job.message == "Речь не обнаружена"
     assert (job.text or "") == ""
+
+def test_resolve_track_path_basics(tmp_path: Path, monkeypatch) -> None:
+    r"""Резолвер дорожек: обычные пути не ломаются, битые — аккуратно None.
+
+    Стиль «data\jitsi\…» из нативных записей проверяется живьём в контейнере
+    (там обратные слэши — символы имени файла; на Windows обе формы — один и
+    тот же путь, эмулировать нечего).
+    """
+    monkeypatch.chdir(tmp_path)
+    track = tmp_path / "data" / "jitsi" / "job1" / "p01.wav"
+    track.parent.mkdir(parents=True)
+    track.write_bytes(b"RIFF")
+
+    assert resolve_track_path("data/jitsi/job1/p01.wav") == Path("data/jitsi/job1/p01.wav")
+    assert resolve_track_path("data\\jitsi\\job1\\p01.wav") is not None  # windows-форма
+    assert resolve_track_path("data/jitsi/job1/нет.wav") is None
+    assert resolve_track_path(None) is None
+    assert resolve_track_path("") is None
