@@ -836,6 +836,10 @@ class _LiveSession:
         """
         if self._finalized:
             return False
+        if self._stop_requested.is_set() and self._settings.drop_realtime_on_finalize:
+            # Запись завершается: хвост не дожимаем (drop_realtime_on_finalize).
+            self._finalize()
+            return False
         self._feed_pending()
         lag_before = self._total_lag()
         self._tick_budget(max_ticks=max_ticks, max_sec=max_sec)
@@ -858,6 +862,8 @@ class _LiveSession:
         hypothesis returns through :meth:`end_batch_window`. ``cap_sec``
         bounds the window so a lagging session cannot blow up the batch.
         """
+        if self._stop_requested.is_set() and self._settings.drop_realtime_on_finalize:
+            return None  # завершение: новые окна не собираем
         self._feed_pending()
         self._batch_lag_before = self._total_lag()
         for track, tracker in self._trackers.items():
@@ -876,9 +882,14 @@ class _LiveSession:
                     list(words), hold_sec=self._settings.live_batch_hold_sec
                 )
         lag_after = self._total_lag()
-        if self._stop_requested.is_set() and (lag_after == 0.0 or lag_after >= lag_before):
+        if self._stop_requested.is_set() and (
+            self._settings.drop_realtime_on_finalize
+            or lag_after == 0.0
+            or lag_after >= lag_before
+        ):
             # Same contract as ``serve``: a stopped session with nothing left
-            # (or no progress) finalizes instead of waiting forever.
+            # (or no progress) finalizes instead of waiting forever; with
+            # drop_realtime_on_finalize the tail is dropped right away.
             self._finalize()
             return False
         return self.needs_turn()
@@ -1012,12 +1023,22 @@ class _LiveSession:
         if self._finalized:
             return
         error: str | None = None
-        try:
-            for tracker in self._trackers.values():
-                tracker.flush()
-        except Exception as exc:  # noqa: BLE001 — a broken tail must still finalize
-            log.exception("live-сессия %s: финальный проход упал", self.job.id)
-            error = str(exc)
+        drop = self._settings.drop_realtime_on_finalize
+        if not drop:
+            try:
+                for tracker in self._trackers.values():
+                    tracker.flush()
+            except Exception as exc:  # noqa: BLE001 — a broken tail must still finalize
+                log.exception("live-сессия %s: финальный проход упал", self.job.id)
+                error = str(exc)
+        elif self.transcribe:
+            # Настройка отбрасывания рилтайма: хвост в трекерах не дожимаем
+            # (запись на диске полная, текст восстановит улучшение).
+            tail = self._has_pending() or any(
+                tracker.lag_seconds > 0 for tracker in self._trackers.values()
+            )
+            if tail:
+                self.job.meta["realtime_dropped"] = True
         self._close_writers()
         duration = time.monotonic() - self._started_monotonic
         self._persist()

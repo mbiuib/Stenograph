@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 log = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
+_PROCESS_STARTED = time.time()  # аптайм процесса для монитора
 _MODELS: dict[str, dict] = {}
 _BASELINE: tuple[int | None, float | None] | None = None
 _CPU_PREV: tuple[float, float] | None = None
@@ -362,6 +363,7 @@ def snapshot(
                 "commit_mb": commit,
                 "cpu_pct": _cpu_pct(),
                 "vram_mb": self_vram,
+                "uptime_sec": round(now - _PROCESS_STARTED, 1),
             },
             "gpu_processes": procs,
         },

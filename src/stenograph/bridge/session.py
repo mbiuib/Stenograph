@@ -219,6 +219,7 @@ class MeetingSession:
         self._idle_stop_sec = settings.jitsi_idle_stop_sec  # 0 = watchdog off
         self._last_frame_monotonic = self._started_monotonic
         self._stop_reason: str | None = None  # "manual" | "idle" | None
+        self._drop_realtime = False  # сработал drop_realtime_on_finalize
         self._audio_dir = settings.data_dir / "jitsi" / self.job.id
         self._audio_dir.mkdir(parents=True, exist_ok=True)
         self._worker = threading.Thread(
@@ -346,7 +347,7 @@ class MeetingSession:
             else:
                 start = participant.next_offset  # джиттер сети: пишем встык
             participant.next_offset = start + duration
-            if self.transcribe:
+            if self.transcribe and not self._drop_realtime:
                 if silence_sec:
                     blocks = _silence_blocks(silence_sec)
                     self._pending[participant_id].extend(blocks)
@@ -722,6 +723,8 @@ class MeetingSession:
 
     def _participant_needs_turn(self, participant_id: str) -> bool:
         """True while the pool still has work for this participant."""
+        if self._drop_realtime:
+            return False  # встреча завершается — рилтайм-хвост отброшен
         with self._lock:
             has_pending = bool(self._pending.get(participant_id))
         if has_pending:
@@ -783,11 +786,14 @@ class MeetingSession:
             if gate is not None:  # декодер один — не финализируем толпой
                 gate.acquire()
             try:
-                self._detach_streams()
-                self._pump_participants()
-                for participant in list(self._participants.values()):
-                    if participant.tracker is not None:
-                        participant.tracker.flush()
+                if self._settings.drop_realtime_on_finalize:
+                    self._drop_realtime_finalize()
+                else:
+                    self._detach_streams()
+                    self._pump_participants()
+                    for participant in list(self._participants.values()):
+                        if participant.tracker is not None:
+                            participant.tracker.flush()
                 self._finish()
             finally:
                 if gate is not None:
@@ -804,6 +810,14 @@ class MeetingSession:
         ``unadopt`` waits for any in-flight serve round, so after it returns
         the tracker belongs exclusively to this thread again.
         """
+        self._release_streams(drain=True)
+
+    def _release_streams(self, *, drain: bool) -> None:
+        """Unadopt pooled participants; optionally pull their backlog in.
+
+        ``drain=False`` is the drop_realtime_on_finalize path: the queued
+        audio is not pushed through the decoder any more.
+        """
         pool = self._pool
         if pool is None:
             return
@@ -818,7 +832,35 @@ class MeetingSession:
                     participant.participant_id,
                 )
             participant.stream = None
-            self._drain_pending(participant.participant_id, unlimited=True)
+            if drain:
+                self._drain_pending(participant.participant_id, unlimited=True)
+
+    def _drop_realtime_finalize(self) -> None:
+        """Finish without the realtime tail (``drop_realtime_on_finalize``).
+
+        The queued-but-undecoded audio and the trackers' buffered tails are
+        dropped instead of being pushed through the decoder: the meeting is
+        over, the captions were live-only, and under overload that drain is
+        what kept finalizes running for minutes. The WAVs keep every frame —
+        the quality pass restores the full text afterwards.
+        """
+        self._drop_realtime = True
+        with self._lock:
+            dropped = any(self._pending.values())
+            for participant_id in list(self._pending):
+                self._pending[participant_id] = []
+                self._pending_samples[participant_id] = 0
+        self._release_streams(drain=False)
+        tail = any(
+            participant.tracker is not None and participant.tracker.lag_seconds > 0
+            for participant in self._participants.values()
+        )
+        if dropped or tail:
+            self.job.meta["realtime_dropped"] = True
+            log.info(
+                "jitsi bridge: встреча %s — realtime-хвост отброшен (настройка)",
+                self.meeting_id,
+            )
 
     def _pump_participants(self) -> None:
         for participant_id, participant in list(self._participants.items()):

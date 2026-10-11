@@ -11,9 +11,11 @@ import functools
 import json
 import logging
 import queue
+import threading
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import anyio
 from fastapi import (
@@ -49,6 +51,7 @@ from ..live.capture import CaptureError, capture_supported, describe_devices
 from ..live.manager import LiveManager
 from ..live.web import parse_upload_frame
 from ..service import TranscriptionService, build_default_service
+from ..settings_service import SettingsService
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +63,18 @@ class JobUpdate(BaseModel):
     speaker_names: dict[str, str] | None = None
 
 
+class SettingsPatch(BaseModel):
+    """Runtime settings update (PATCH /api/settings)."""
+
+    values: dict[str, Any]
+
+
+class SettingsReset(BaseModel):
+    """Reset one setting (POST /api/settings/reset)."""
+
+    key: str
+
+
 def create_app(
     settings: Settings | None = None,
     service: TranscriptionService | None = None,
@@ -69,6 +84,9 @@ def create_app(
     """Build the web application; inject a service/live/bridge manager for tests."""
     settings = settings or get_settings()
     settings.ensure_dirs()
+    # Настройки, изменённые в рантайме, применяются ДО всего остального:
+    # очередь, лимиты и модели строятся уже с учётом сохранённых значений.
+    settings_service = SettingsService(settings)
     metrics.prime()
     model_budget.configure(settings.model_idle_unload_sec)
     service = service or build_default_service(settings)
@@ -95,6 +113,30 @@ def create_app(
     # jobs orphaned by the previous shutdown (see Settings.restart_recover).
     service.recover_after_restart()
 
+    # Побочные эффекты смены настроек в рантайме (значение уже в settings,
+    # а этим компонентам нужно передать его отдельно).
+    settings_service.add_applier("model_idle_unload_sec", model_budget.configure)
+
+    def _apply_auto_reprocess(value: bool) -> None:
+        live._auto_reprocess = value  # noqa: SLF001 — смена тумблера без пересборки менеджеров
+        bridge._auto_reprocess = value  # noqa: SLF001
+
+    settings_service.add_applier("live_auto_reprocess", _apply_auto_reprocess)
+
+    def _apply_finalize_gate(value: int) -> None:
+        limit = int(value)
+        bridge._finalize_gate = (  # noqa: SLF001 — новые встречи берут новый семафор
+            threading.Semaphore(limit) if limit > 0 else None
+        )
+
+    settings_service.add_applier("bridge_finalize_concurrency", _apply_finalize_gate)
+
+    def _apply_log_level(value: str) -> None:
+        level = getattr(logging, value.upper(), logging.INFO)
+        logging.getLogger("stenograph").setLevel(level)
+
+    settings_service.add_applier("log_level", _apply_log_level)
+
     @contextlib.asynccontextmanager
     async def lifespan(_web: FastAPI) -> AsyncIterator[None]:
         """Run the event-loop lag watchdog for the whole app lifetime.
@@ -112,6 +154,7 @@ def create_app(
 
     app = FastAPI(title="Стенограф", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.settings_service = settings_service
     app.state.service = service
     app.state.live = live
     app.state.bridge = bridge
@@ -380,6 +423,23 @@ def create_app(
             },
         }
 
+    @app.get("/api/settings")
+    def get_settings_view() -> dict:
+        """«Настройки» tab: grouped, runtime-editable settings."""
+        return settings_service.snapshot()
+
+    @app.patch("/api/settings")
+    def patch_settings(payload: SettingsPatch) -> dict:
+        """Apply runtime settings; validation errors are reported per key."""
+        result = settings_service.update(payload.values)
+        return {**result, "settings": settings_service.snapshot()}
+
+    @app.post("/api/settings/reset")
+    def reset_setting(payload: SettingsReset) -> dict:
+        """Return one setting to its environment/default value."""
+        result = settings_service.reset(payload.key)
+        return {**result, "settings": settings_service.snapshot()}
+
     @app.get("/api/queue")
     def get_queue() -> dict:
         """Running and waiting jobs. Parallel workers may run several at once."""
@@ -435,6 +495,13 @@ def create_app(
             # Remote mode: the models live in the ASR service — proxy its
             # snapshot so the monitor is not blind (best-effort, quick).
             snapshot["asr_service"] = fetch_service_metrics(settings.asr_url)
+        # Цифры самого процесса сервера (версия, аптайм, отставание цикла):
+        # монитор показывает их в отдельной панели «сервер стенографа».
+        snapshot["server"] = {
+            "version": __version__,
+            "loop_lag_ms": round(loopwatch.monitor.last_sec * 1000),
+            "loop_lag_max_ms": round(loopwatch.monitor.max_sec * 1000),
+        }
         return snapshot
 
     @app.post("/api/models/unload")

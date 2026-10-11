@@ -50,14 +50,14 @@ class BridgeManager:
         self._finalize_gate: threading.Semaphore | None = (
             threading.Semaphore(limit) if limit > 0 else None
         )
-        budget = settings.bridge_total_pending_max_sec
-        if budget > 0:  # надзор за общим бюджетом бэклога (демон, 1 Гц)
-            threading.Thread(
-                target=self._budget_loop,
-                args=(budget,),
-                name="stenograph-bridge-budget",
-                daemon=True,
-            ).start()
+        # Надзор за общим бюджетом бэклога (демон, 1 Гц). Поток запускается
+        # всегда, а бюджет читается из настроек на каждом проходе — смена
+        # лимита в рантайме действует сразу (0 = бюджет выключен).
+        threading.Thread(
+            target=self._budget_loop,
+            name="stenograph-bridge-budget",
+            daemon=True,
+        ).start()
 
     def start(self, meeting_id: str) -> MeetingSession:
         """Start a session for a meeting connection (replacing a stale one)."""
@@ -140,18 +140,22 @@ class BridgeManager:
         meetings = [session.status() for session in sessions]
         return {"active": bool(meetings), "meetings": meetings}
 
-    def _budget_loop(self, budget_sec: float) -> None:
-        """Keep the total queued backlog within ``budget_sec`` (daemon, 1 Hz).
+    def _budget_loop(self) -> None:
+        """Keep the total queued backlog within the configured budget (1 Hz).
 
         A saturated decoder drains its backlog after the meetings close; the
         per-stream caps alone would still allow hours of queued audio across
         hundreds of streams. The budget bounds that drain to minutes: realtime
-        captions lose the oldest frames, recordings stay intact.
+        captions lose the oldest frames, recordings stay intact. The budget is
+        re-read from the settings on every pass, so a runtime change applies
+        immediately (0 disables the sweeper).
         """
         while True:
             time.sleep(1.0)
             try:
-                self._enforce_budget(budget_sec)
+                budget = self._settings.bridge_total_pending_max_sec
+                if budget > 0:
+                    self._enforce_budget(budget)
             except Exception:  # noqa: BLE001 — the sweeper must never die
                 log.exception("jitsi bridge: сбой надзора за бюджетом бэклога")
 

@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     # MEETSCRIBE_BRIDGE_FINALIZE_CONCURRENCY: how many meetings may drain
     # their remaining backlog simultaneously when finalizing (0 = unlimited).
     bridge_finalize_concurrency: int = 2
+    # MEETSCRIBE_DROP_REALTIME_ON_FINALIZE: when a meeting/recording ends,
+    # drop whatever realtime processing (captions, partial text) is still
+    # queued instead of draining it through the decoder. The recording on
+    # disk keeps every frame — the quality pass transcribes everything
+    # afterwards; the finalize just stops spending decoder time on captions
+    # for a session that is already over. Off by default: the drain only
+    # hurts under heavy load — flip it on in «Настройки» for stress runs.
+    drop_realtime_on_finalize: bool = False
     # MEETSCRIBE_JITSI_IDLE_STOP_SEC: finalize a Jitsi meeting automatically
     # after this many seconds without any speech (0 = disabled). Covers the
     # "everybody left, but a forgotten client keeps the room alive" case:
