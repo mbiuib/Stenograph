@@ -234,22 +234,30 @@ class JobRepository:
             collected: dict[str, sqlite3.Row] = {row["id"]: row for row in roots}
             frontier = [row["id"] for row in roots]
             while frontier:
-                marks = ",".join("?" * len(frontier))
-                child_where = [
-                    f"(parent_id IN ({marks}) OR retry_of_id IN ({marks}))"
-                ]
-                child_params: list[object] = [*frontier, *frontier]
-                self._apply_filters(child_where, child_params, status, kind, query)
-                children = self._conn.execute(
-                    f"SELECT {_SLIM_COLUMNS} FROM jobs WHERE {' AND '.join(child_where)} "
-                    "ORDER BY created_at DESC",
-                    child_params,
-                ).fetchall()
-                frontier = []
-                for row in children:
-                    if row["id"] not in collected:
-                        collected[row["id"]] = row
-                        frontier.append(row["id"])
+                marks = ", ".join("?" * len(frontier))
+                next_frontier: list[str] = []
+                for link, index_name in (
+                    ("parent_id", "idx_jobs_parent"),
+                    ("retry_of_id", "idx_jobs_retry_of"),
+                ):
+                    # Один запрос с OR и фильтром статуса роняет оптимизацию
+                    # MULTI-INDEX OR, а без OR планировщик (особенно на пустой
+                    # статистике) уходит на idx_jobs_status и перебирает сотни
+                    # строк — INDEXED BY фиксирует индекс связей.
+                    child_where = [f"{link} IN ({marks})"]
+                    child_params: list[object] = list(frontier)
+                    self._apply_filters(child_where, child_params, status, kind, query)
+                    children = self._conn.execute(
+                        f"SELECT {_SLIM_COLUMNS} FROM jobs INDEXED BY {index_name} "
+                        f"WHERE {' AND '.join(child_where)} "
+                        "ORDER BY created_at DESC",
+                        child_params,
+                    ).fetchall()
+                    for row in children:
+                        if row["id"] not in collected:
+                            collected[row["id"]] = row
+                            next_frontier.append(row["id"])
+                frontier = next_frontier
         jobs = [_row_to_job(row, slim=True) for row in collected.values()]
         jobs.sort(key=lambda job: job.created_at, reverse=True)
         return jobs, has_more

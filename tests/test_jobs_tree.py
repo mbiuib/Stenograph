@@ -159,6 +159,18 @@ def test_roots_query_uses_the_partial_index(tmp_path: Path) -> None:
     detail_status = " ".join(str(row["detail"]) for row in plan_status)
     assert "idx_jobs_roots_status" in detail_status, detail_status
 
+    with repo._lock:
+        plan_children = repo._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id FROM jobs INDEXED BY idx_jobs_parent "
+            "WHERE parent_id IN ('a', 'b') AND status = 'done' "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+    detail_children = " ".join(str(row["detail"]) for row in plan_children)
+    # Дети статусной вкладки обязаны идти по индексу связей: без INDEXED BY
+    # планировщик уходил на idx_jobs_status и перебирал все «готовые» строки.
+    assert "idx_jobs_parent" in detail_children, detail_children
+
 
 def test_list_is_slim_but_detail_keeps_the_transcript(tmp_path: Path) -> None:
     """Список не несёт транскрипт и тяжёлые мета; detail — несёт."""
