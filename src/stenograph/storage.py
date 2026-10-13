@@ -19,7 +19,7 @@ from .domain.models import Job, JobStatus
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,
@@ -68,6 +68,23 @@ CREATE INDEX IF NOT EXISTS idx_jobs_roots_status
     WHERE parent_id IS NULL AND retry_of_id IS NULL;
 """
 
+#: v4: метрики дашборда (duration, processing_seconds, engine) вынесены из
+#: meta в колонки с покрывающими индексами. json_extract-агрегаты по meta
+#: читали и парсили 10–15 КБ на строку — /api/stats отвечал секунды.
+_SCHEMA_V4 = """
+ALTER TABLE jobs ADD COLUMN duration REAL;
+ALTER TABLE jobs ADD COLUMN processing_seconds REAL;
+ALTER TABLE jobs ADD COLUMN engine TEXT;
+UPDATE jobs SET
+    duration = json_extract(meta, '$.duration'),
+    processing_seconds = json_extract(meta, '$.processing_seconds'),
+    engine = json_extract(meta, '$.engine');
+CREATE INDEX IF NOT EXISTS idx_jobs_done_totals
+    ON jobs(status, duration, processing_seconds);
+CREATE INDEX IF NOT EXISTS idx_jobs_engine ON jobs(engine);
+CREATE INDEX IF NOT EXISTS idx_jobs_activity ON jobs(created_at, duration);
+"""
+
 _COLUMNS = (
     "id, kind, source_name, source_path, status, progress, message, language, "
     "text, segments, error, meta, created_at, started_at, finished_at"
@@ -111,6 +128,9 @@ class JobRepository:
             if version < 3:
                 self._conn.executescript(_SCHEMA_V3)
                 log.info("database migrated to schema v3 (partial roots index)")
+            if version < 4:
+                self._conn.executescript(_SCHEMA_V4)
+                log.info("database migrated to schema v4 (metric columns)")
             if version < _SCHEMA_VERSION:
                 self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 log.info("initialized database schema v%d", _SCHEMA_VERSION)
@@ -120,6 +140,7 @@ class JobRepository:
         meta = job.meta or {}
         parent = meta.get("parent")
         retry_of = meta.get("retry_of")
+        engine = meta.get("engine")
         values = (
             job.id,
             job.kind,
@@ -138,9 +159,12 @@ class JobRepository:
             job.finished_at,
             str(parent) if parent else None,
             str(retry_of) if retry_of else None,
+            meta.get("duration"),
+            meta.get("processing_seconds"),
+            str(engine) if engine else None,
         )
-        columns = f"{_COLUMNS}, parent_id, retry_of_id"
-        placeholders = ", ".join("?" * 17)
+        columns = f"{_COLUMNS}, parent_id, retry_of_id, duration, processing_seconds, engine"
+        placeholders = ", ".join("?" * 20)
         update_clause = ", ".join(
             f"{column.strip()} = excluded.{column.strip()}"
             for column in columns.split(",")
@@ -337,10 +361,9 @@ class JobRepository:
         with self._lock:
             row = self._conn.execute(
                 "SELECT "
-                "COALESCE(SUM(json_extract(meta, '$.duration')), 0) AS audio_seconds, "
-                "COALESCE(SUM(json_extract(meta, '$.processing_seconds')), 0) "
-                "AS processing_seconds "
-                "FROM jobs WHERE status = 'done'"
+                "COALESCE(SUM(duration), 0) AS audio_seconds, "
+                "COALESCE(SUM(processing_seconds), 0) AS processing_seconds "
+                "FROM jobs INDEXED BY idx_jobs_done_totals WHERE status = 'done'"
             ).fetchone()
         audio = float(row["audio_seconds"] or 0.0) if row else 0.0
         processing = float(row["processing_seconds"] or 0.0) if row else 0.0
@@ -353,8 +376,8 @@ class JobRepository:
             rows = self._conn.execute(
                 "SELECT date(created_at, 'unixepoch', 'localtime') AS day, "
                 "COUNT(*) AS jobs, "
-                "COALESCE(SUM(json_extract(meta, '$.duration')), 0) AS audio_seconds "
-                "FROM jobs WHERE created_at >= ? "
+                "COALESCE(SUM(duration), 0) AS audio_seconds "
+                "FROM jobs INDEXED BY idx_jobs_activity WHERE created_at >= ? "
                 "GROUP BY day ORDER BY day",
                 (threshold,),
             ).fetchall()
@@ -371,11 +394,13 @@ class JobRepository:
         """Finished job counts per ASR engine."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT COALESCE(json_extract(meta, '$.engine'), '—') AS engine, "
-                "COUNT(*) AS jobs "
-                "FROM jobs WHERE status = 'done' GROUP BY engine ORDER BY jobs DESC"
+                "SELECT engine, COUNT(*) AS jobs FROM jobs INDEXED BY idx_jobs_engine "
+                "WHERE status = 'done' GROUP BY engine ORDER BY jobs DESC"
             ).fetchall()
-        return [{"engine": row["engine"], "jobs": row["jobs"]} for row in rows]
+        return [
+            {"engine": row["engine"] or "—", "jobs": row["jobs"]}
+            for row in rows
+        ]
 
 
 def _row_to_job(row: sqlite3.Row, *, slim: bool = False) -> Job:

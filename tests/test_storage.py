@@ -70,3 +70,44 @@ def test_get_many_fetches_slim_in_one_query(tmp_path: Path) -> None:
     full = repo.get_many([jobs[1].id], slim=False)
     assert full[jobs[1].id].text == "секрет"
     assert repo.get_many([]) == {}
+
+
+def test_v1_database_backfills_metric_columns(tmp_path: Path) -> None:
+    """Миграция v4: duration/processing_seconds/engine заполняются из meta."""
+    import json as jsonlib
+    import sqlite3
+
+    from stenograph import storage as storage_module
+
+    db = tmp_path / "legacy4.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(storage_module._SCHEMA)  # схема v1: колонок метрик нет
+    conn.execute("PRAGMA user_version=1")
+    conn.execute(
+        "INSERT INTO jobs (id, kind, source_name, status, meta, created_at, segments, text) "
+        "VALUES ('j1', 'file', 'j1', 'done', ?, 100.0, '[]', '')",
+        (jsonlib.dumps({"duration": 12.5, "processing_seconds": 5.0, "engine": "moss"}),),
+    )
+    conn.commit()
+    conn.close()
+
+    repo = JobRepository(db)  # открытие мигрирует базу до v4
+
+    totals = repo.totals()
+    assert totals["audio_seconds"] == 12.5
+    assert totals["processing_seconds"] == 5.0
+    assert repo.engine_usage() == [{"engine": "moss", "jobs": 1}]
+
+
+def test_metric_columns_follow_meta_on_save(tmp_path: Path) -> None:
+    """save() поддерживает метрики-колонки синхронно с meta (дашборд читает их)."""
+    repo = JobRepository(tmp_path / "metrics.db")
+    job = Job(source_name="a.mp3")
+    job.meta.update({"duration": 61.0, "processing_seconds": 7.2, "engine": "gigaam"})
+    repo.save(job)
+
+    with repo._lock:
+        row = repo._conn.execute(
+            "SELECT duration, processing_seconds, engine FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()
+    assert (row["duration"], row["processing_seconds"], row["engine"]) == (61.0, 7.2, "gigaam")
