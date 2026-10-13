@@ -706,9 +706,11 @@ services:
             - '127.0.0.1:${ASR_HOST_PORT:-9001}:9001'
         volumes:
             - ${STENOGRAPH_MODELS_DIR:-G:/LLMs/models}:/models
+            - ../../data:/app/data:ro
         environment:
             - MEETSCRIBE_MODELS_DIR=/models
             - MEETSCRIBE_DATA_DIR=/tmp/stenograph
+            - MEETSCRIBE_SETTINGS_OVERRIDES=/app/data/settings_overrides.json
             - MEETSCRIBE_FFMPEG=ffmpeg
             - MEETSCRIBE_FFPROBE=ffprobe
             - MEETSCRIBE_ASR_HOST=0.0.0.0

@@ -33,6 +33,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -50,38 +51,132 @@ from .engines.base import AsrEngine, AsrResult, NoSpeechError, TranscribeOptions
 log = logging.getLogger(__name__)
 
 
-class EnginePool:
-    """Lazily built engines with one call lock per engine.
+def _engine_footprint(engine: AsrEngine) -> int | None:
+    """Measured VRAM of a loaded copy of ``engine`` (None = unknown)."""
+    model = str(getattr(engine, "model_ref", None) or getattr(engine, "model_id", ""))
+    return metrics.model_vram_mb(str(getattr(engine, "name", "")), model)
 
-    Model inference is not re-entrant: concurrent HTTP requests for the same
-    engine serialize on its lock (mirrors the live pool's single engine lock).
+
+def can_grow_engine(name: str, engine: AsrEngine) -> bool:
+    """Fit another copy of ``engine`` into the free VRAM?
+
+    The estimate is the already-loaded first copy's measured footprint
+    (:func:`metrics.model_vram_mb`) plus a margin — no measurement, no
+    growth (we don't gamble GPU memory).
+    """
+    gpu = metrics.gpu_info()
+    if gpu is None:
+        return False
+    measured = _engine_footprint(engine)
+    if not measured:
+        return False
+    need = int(measured * 1.15) + 256
+    return int(gpu.get("vram_free_mb") or 0) >= need
+
+
+class EnginePool:
+    """Lazily built engines; every name owns one replica, grown on demand.
+
+    Model inference is not re-entrant, so each replica carries its own call
+    lock and concurrent requests for the same name serialize per replica.
+    When every replica is busy and the configured limit allows more, one
+    extra replica is built in the BACKGROUND (; the triggering request serves
+    from the first replica and waits at most one in-flight call). Growth is
+    gated by free VRAM and backs off after a refusal or a failed build.
+    Extra copies let file transcriptions and live windows run without
+    queueing behind each other.
     """
 
-    def __init__(self, build: Callable[[str], AsrEngine]) -> None:
+    _GROW_RETRY_NO_MEASURE_SEC = 15.0  # первая копия, возможно, ещё грузится
+    _GROW_RETRY_FAILED_SEC = 120.0  # отказ по памяти или сбой загрузки
+
+    def __init__(
+        self,
+        build: Callable[[str], AsrEngine],
+        *,
+        copies: Callable[[str], int] | None = None,
+        can_grow: Callable[[str, AsrEngine], bool] | None = None,
+    ) -> None:
         self._build = build
+        self._copies = copies or (lambda name: 1)
+        self._can_grow = can_grow or (lambda name, engine: True)
         self._lock = threading.Lock()
-        self._engines: dict[str, AsrEngine] = {}
-        self._call_locks: dict[str, threading.Lock] = {}
+        self._replicas: dict[str, list[tuple[AsrEngine, threading.Lock]]] = {}
+        self._growing: set[str] = set()
+        self._grow_retry_at: dict[str, float] = {}
 
     # gigaam-live — тот же самый движок, что gigaam: без канонизации сервис
     # держал бы по копии модели на каждый алиас (файлы + окна = две копии VRAM).
     _POOL_ALIASES = {"gigaam-live": "gigaam"}
 
     def get(self, name: str) -> tuple[AsrEngine, threading.Lock]:
-        """Engine instance and its call lock; KeyError for an unknown name."""
+        """Engine replica and its call lock; KeyError for an unknown name."""
         name = self._POOL_ALIASES.get(name, name)
+        spawn = False
         with self._lock:
-            engine = self._engines.get(name)
-            if engine is None:
-                engine = self._build(name)  # unknown names raise KeyError here
-                self._engines[name] = engine
-                self._call_locks[name] = threading.Lock()
-            return engine, self._call_locks[name]
+            replicas = self._replicas.get(name)
+            if not replicas:
+                replicas = [(self._build(name), threading.Lock())]  # unknown names raise KeyError
+                self._replicas[name] = replicas
+            for engine, call_lock in replicas:
+                if not call_lock.locked():
+                    return engine, call_lock
+            # Все копии заняты: текущий запрос обслуживает первая (ждёт максимум
+            # один текущий вызов), а следующая копия строится фоном.
+            if len(replicas) < self._copies(name):
+                spawn = True
+            chosen = replicas[0]
+        if spawn:
+            self._spawn_growth(name)
+        return chosen
 
     def loaded(self) -> list[str]:
         """Names whose engines were already built in this process."""
         with self._lock:
-            return sorted(self._engines)
+            return sorted(self._replicas)
+
+    def _spawn_growth(self, name: str) -> None:
+        """Kick a background replica build unless one is running or backing off."""
+        with self._lock:
+            if name in self._growing or time.monotonic() < self._grow_retry_at.get(name, 0.0):
+                return
+            self._growing.add(name)
+        threading.Thread(
+            target=self._grow, args=(name,), name=f"asr-grow-{name}", daemon=True
+        ).start()
+
+    def _set_retry(self, name: str, delay: float) -> None:
+        """Remember a retry moment; also marks the current attempt as finished."""
+        with self._lock:
+            self._grow_retry_at[name] = time.monotonic() + delay
+            self._growing.discard(name)
+
+    def _grow(self, name: str) -> None:
+        """Build and warm one more replica; VRAM-gated, backing off on refusals."""
+        try:
+            with self._lock:
+                sample = self._replicas[name][0][0]  # первая копия — эталон памяти
+            if _engine_footprint(sample) is None:
+                self._set_retry(name, self._GROW_RETRY_NO_MEASURE_SEC)
+                return
+            if not self._can_grow(name, sample):
+                self._set_retry(name, self._GROW_RETRY_FAILED_SEC)
+                return
+            fresh = self._build(name)
+            loader = getattr(fresh, "_load", None)
+            if callable(loader):
+                loader()  # греем копию здесь же: первый запрос не должен ждать загрузку
+        except Exception:  # noqa: BLE001 — рост не должен ронять сервис
+            log.exception("asr: не удалось поднять копию движка %s", name)
+            self._set_retry(name, self._GROW_RETRY_FAILED_SEC)
+            return
+        with self._lock:
+            self._replicas[name].append((fresh, threading.Lock()))
+            self._growing.discard(name)
+            self._grow_retry_at.pop(name, None)  # успех снимает бэкофф
+        log.info(
+            "asr: поднята ещё одна копия движка %s (%d всего)", name, len(self._replicas[name])
+        )
 
 
 class WindowBatch(BaseModel):
@@ -191,10 +286,23 @@ def create_app(
     """Build the ASR service; inject an engine factory for tests."""
     settings = settings or get_settings()
     settings.ensure_dirs()
+    # Рантайм-переопределения из «Настроек» сервера: без этого UI-правки
+    # сервисных ключей (gigaam_*, движок по умолчанию) не доходили бы до
+    # процесса, который реально грузит модели. Только чтение.
+    from .settings_service import SettingsService
+
+    overrides_path = (
+        Path(settings.settings_overrides) if settings.settings_overrides else None
+    )
+    SettingsService(settings, path=overrides_path)
     model_budget.configure(settings.model_idle_unload_sec)
     metrics.prime()  # baseline for the per-model VRAM/RAM deltas
     build = engine_factory or (lambda name: build_default_engine(name, settings))
-    pool = EnginePool(build)
+    pool = EnginePool(
+        build,
+        copies=lambda name: settings.gigaam_copies if name == "gigaam" else 1,
+        can_grow=can_grow_engine,
+    )
     cancels = CancelRegistry()
 
     app = FastAPI(title="Стенограф ASR", version=__version__)

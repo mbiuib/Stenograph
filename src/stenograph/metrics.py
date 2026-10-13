@@ -328,6 +328,15 @@ def note_model_unloaded(engine: str, model: str) -> None:
     log.info("metrics: %s:%s unloaded", engine, model)
 
 
+def model_vram_mb(engine: str, model: str) -> int | None:
+    """Measured VRAM footprint of a loaded model (None when unknown/CPU)."""
+    with _LOCK:
+        entry = _MODELS.get(f"{engine}:{model}")
+    if not entry or not entry.get("vram_mb"):
+        return None
+    return int(entry["vram_mb"])
+
+
 def snapshot(
     *,
     live: dict | None = None,

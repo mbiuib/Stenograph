@@ -105,7 +105,8 @@ def _defs() -> tuple[SettingDef, ...]:
             "processing",
             "str",
             APPLIES_RESTART,
-            "HF-репозиторий или папка «GigaAM-Multilingual» в каталоге моделей.",
+            "HF-репозиторий или папка «GigaAM-Multilingual» в каталоге моделей."
+            " Применяется после перезапуска сервиса с моделями (в стеке — контейнера asr).",
         ),
         SettingDef(
             "gigaam_revision",
@@ -113,7 +114,8 @@ def _defs() -> tuple[SettingDef, ...]:
             "processing",
             "str",
             APPLIES_RESTART,
-            "ctc (220M) — быстрая; large_ctc (600M) — точнее.",
+            "ctc (220M) — быстрая; large_ctc (600M) — точнее."
+            " Применяется после перезапуска сервиса с моделями (в стеке — контейнера asr).",
             choices=("ctc", "large_ctc"),
         ),
         SettingDef(
@@ -122,9 +124,24 @@ def _defs() -> tuple[SettingDef, ...]:
             "processing",
             "float",
             APPLIES_RESTART,
-            "Кусок нарезки длинных файлов (модель принимает не больше 25 с за проход).",
+            "Кусок нарезки длинных файлов (модель принимает не больше 25 с за проход)."
+            " Применяется после перезапуска сервиса с моделями (в стеке — контейнера asr).",
             minimum=5,
             maximum=24.5,
+        ),
+        SettingDef(
+            "gigaam_copies",
+            "Копий GigaAM в сервисе",
+            "processing",
+            "int",
+            APPLIES_RESTART,
+            "Сколько копий модели может держать ASR-сервис (1–4). Копия "
+            "поднимается только при конкуренции — файлы и окна Live/Jitsi "
+            "перестают ждать друг друга, — и только если хватает свободной "
+            "VRAM (каждая ~1 ГБ для ctc)."
+            " Применяется после перезапуска сервиса с моделями (в стеке — контейнера asr).",
+            minimum=1,
+            maximum=4,
         ),
         SettingDef(
             "reprocess_engine",

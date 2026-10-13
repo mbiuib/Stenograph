@@ -53,7 +53,17 @@ class Settings(BaseSettings):
     gigaam_model: str = "ai-sage/GigaAM-Multilingual"
     gigaam_revision: str = "ctc"
     gigaam_chunk_sec: float = 22.0  # <= 24.5: модель принимает не больше 25 с за проход
+    # MEETSCRIBE_GIGAAM_COPIES: how many GigaAM replicas the ASR service may
+    # hold (1-4). A second replica is built on demand — when every copy is
+    # busy and the free VRAM fits one more — so file transcriptions and live
+    # windows Stop queueing behind each other. 1 keeps the old behaviour.
+    gigaam_copies: int = 1
     language: str = "auto"
+    # MEETSCRIBE_SETTINGS_OVERRIDES: path to the server's runtime settings file
+    # (data/settings_overrides.json). The ASR service reads it at start so
+    # UI changes for service-side knobs (gigaam_*, engine defaults) reach the
+    # process that actually loads the models; None = data_dir/settings_overrides.json.
+    settings_overrides: str | None = None
 
     engine: str = "whisper"  # default ASR engine name (see the engines registry)
     # MEETSCRIBE_REPROCESS_ENGINE: engine for auto-chained improvements of
