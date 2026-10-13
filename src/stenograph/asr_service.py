@@ -135,6 +135,17 @@ class EnginePool:
         with self._lock:
             return sorted(self._replicas)
 
+    def copy_counts(self) -> dict[str, int]:
+        """How many replicas each engine currently holds (for the monitor)."""
+        with self._lock:
+            return {name: len(replicas) for name, replicas in self._replicas.items()}
+
+    def copy_limits(self) -> dict[str, int]:
+        """Configured replica cap per engine (how far growth may go)."""
+        with self._lock:
+            names = list(self._replicas)
+        return {name: max(1, int(self._copies(name))) for name in names}
+
     def _spawn_growth(self, name: str) -> None:
         """Kick a background replica build unless one is running or backing off."""
         with self._lock:
@@ -435,8 +446,13 @@ def create_app(
         for key in ("live", "bridge", "queue", "jobs", "llm"):
             snap.pop(key, None)
         busy = model_budget.busy_models()
+        copies = pool.copy_counts()
+        limits = pool.copy_limits()
         for row in snap.get("models", []):
+            name = str(row.get("engine"))
             row["busy"] = (row.get("engine"), row.get("model")) in busy
+            row["copies"] = copies.get(name, 1)
+            row["copies_limit"] = limits.get(name, 1)
         snap["engines_loaded"] = pool.loaded()
         return snap
 

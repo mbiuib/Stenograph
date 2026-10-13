@@ -197,6 +197,10 @@ export interface ModelMemory {
   load_number: number;
   /** true, пока модель выполняет transcribe (даже в долгом прогоне). */
   busy?: boolean;
+  /** Сколько копий движка поднято в ASR-сервисе (для роста при конкуренции). */
+  copies?: number;
+  /** Потолок копий из настроек: копии растут до него при конкуренции. */
+  copies_limit?: number;
 }
 
 export interface AsrServiceMetrics {

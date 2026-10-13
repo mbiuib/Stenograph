@@ -38,6 +38,11 @@ function ModelRow({ model, prefix }: { model: ModelMemory; prefix?: string }) {
       <div className="flex flex-wrap gap-2">
         <Chip>VRAM: {fmtMb(model.vram_mb)}</Chip>
         <Chip>RAM: {fmtMb(model.ram_mb)}</Chip>
+        {model.copies != null && (model.copies_limit ?? 1) > 1 && (
+          <Chip>
+            копий: {model.copies} из {model.copies_limit}
+          </Chip>
+        )}
         {model.load_number === 1 && <Chip>вкл. CUDA-контекст</Chip>}
       </div>
     </li>

@@ -160,6 +160,21 @@ def test_metrics_endpoint_reports_engines(client) -> None:
     assert "llm" not in data  # that section belongs to the main server
 
 
+def test_metrics_reports_copy_counts(client, monkeypatch) -> None:
+    """Строки моделей несут счётчик копий: Монитор покажет «копий: N из M»."""
+    test_client, _ = client
+    monkeypatch.setattr(
+        "stenograph.asr_service.metrics.snapshot",
+        lambda **kwargs: {
+            "system": {},
+            "models": [{"engine": "whisper", "model": "fake-model"}],
+        },
+    )
+    row = test_client.get("/metrics").json()["models"][0]
+    assert row["busy"] is False
+    assert row["copies"] == 1 and row["copies_limit"] == 1
+
+
 def test_unload_endpoint_reports_a_list(client) -> None:
     """POST /models/unload answers with the unloaded names (may be empty)."""
     test_client, _ = client

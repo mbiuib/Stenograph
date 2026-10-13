@@ -104,6 +104,24 @@ def test_pool_growth_respects_the_vram_gate(monkeypatch) -> None:
         lock.release()
 
 
+def test_pool_reports_copies_and_limits_for_the_monitor(monkeypatch) -> None:
+    """Монитор видит, сколько копий поднято и до какого потолка они растут."""
+    monkeypatch.setattr(metrics, "model_vram_mb", lambda name, model: 900)
+    built: list[Stub] = []
+    pool = EnginePool(
+        _recording_build(built),  # type: ignore[arg-type]
+        copies=lambda name: 2 if name == "gigaam" else 1,
+        can_grow=lambda name, engine: True,
+    )
+    pool.get("gigaam")
+    assert pool.copy_counts() == {"gigaam": 1}
+    assert pool.copy_limits() == {"gigaam": 2}
+
+    pool._grow("gigaam")  # в тесте вторую копию поднимаем синхронно
+
+    assert pool.copy_counts() == {"gigaam": 2}
+
+
 def test_can_grow_engine_reads_free_vram_and_measured_footprint(monkeypatch) -> None:
     """Гейт: под копию нужно место с запасом; без замера — отказ."""
     engine = cast(AsrEngine, Stub("gigaam"))
