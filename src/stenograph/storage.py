@@ -18,7 +18,7 @@ from .domain.models import Job, JobStatus
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,
@@ -39,6 +39,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+"""
+
+#: v2: связи parent/retry_of вынесены из meta в индексированные колонки.
+#: Дерево задач иначе читает и парсит тяжёлые meta КАЖДОЙ строки (10–15 КБ),
+#: а через bind-mount докера это занимало секунды на страницу.
+_SCHEMA_V2 = """
+ALTER TABLE jobs ADD COLUMN parent_id TEXT;
+ALTER TABLE jobs ADD COLUMN retry_of_id TEXT;
+UPDATE jobs SET
+    parent_id = json_extract(meta, '$.parent'),
+    retry_of_id = json_extract(meta, '$.retry_of');
+CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs(parent_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_retry_of ON jobs(retry_of_id);
 """
 
 _COLUMNS = (
@@ -76,13 +89,20 @@ class JobRepository:
             self._conn.execute("PRAGMA journal_mode=WAL")
             row = self._conn.execute("PRAGMA user_version").fetchone()
             version = int(row[0]) if row else 0
-            if version < _SCHEMA_VERSION:
+            if version < 1:
                 self._conn.executescript(_SCHEMA)
+            if version < 2:
+                self._conn.executescript(_SCHEMA_V2)
+                log.info("database migrated to schema v2 (parent/retry_of columns)")
+            if version < _SCHEMA_VERSION:
                 self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 log.info("initialized database schema v%d", _SCHEMA_VERSION)
 
     def save(self, job: Job) -> None:
         """Insert or update a job."""
+        meta = job.meta or {}
+        parent = meta.get("parent")
+        retry_of = meta.get("retry_of")
         values = (
             job.id,
             job.kind,
@@ -95,20 +115,23 @@ class JobRepository:
             job.text,
             json.dumps([s.model_dump() for s in job.segments], ensure_ascii=False),
             job.error,
-            json.dumps(job.meta, ensure_ascii=False),
+            json.dumps(meta, ensure_ascii=False),
             job.created_at,
             job.started_at,
             job.finished_at,
+            str(parent) if parent else None,
+            str(retry_of) if retry_of else None,
         )
-        placeholders = ", ".join("?" * 15)
+        columns = f"{_COLUMNS}, parent_id, retry_of_id"
+        placeholders = ", ".join("?" * 17)
         update_clause = ", ".join(
             f"{column.strip()} = excluded.{column.strip()}"
-            for column in _COLUMNS.split(",")
+            for column in columns.split(",")
             if column.strip() != "id"
         )
         with self._lock, self._conn:
             self._conn.execute(
-                f"INSERT INTO jobs ({_COLUMNS}) VALUES ({placeholders}) "
+                f"INSERT INTO jobs ({columns}) VALUES ({placeholders}) "
                 f"ON CONFLICT(id) DO UPDATE SET {update_clause}",
                 values,
             )
@@ -158,10 +181,7 @@ class JobRepository:
         attached through ``meta.parent``/``meta.retry_of`` recursively and
         obey the same status/kind/query filters (что видит UI).
         """
-        root_where = [
-            "json_extract(meta, '$.parent') IS NULL",
-            "json_extract(meta, '$.retry_of') IS NULL",
-        ]
+        root_where = ["parent_id IS NULL", "retry_of_id IS NULL"]
         if kind or query:
             # Режимы «тип» и «поиск»: страница строится по ВСЕМ совпадениям, а
             # не по корням — у улучшений/анализов есть родители другого типа,
@@ -187,8 +207,7 @@ class JobRepository:
             while frontier:
                 marks = ",".join("?" * len(frontier))
                 child_where = [
-                    f"(json_extract(meta, '$.parent') IN ({marks}) "
-                    f"OR json_extract(meta, '$.retry_of') IN ({marks}))"
+                    f"(parent_id IN ({marks}) OR retry_of_id IN ({marks}))"
                 ]
                 child_params: list[object] = [*frontier, *frontier]
                 self._apply_filters(child_where, child_params, status, kind, query)

@@ -104,6 +104,39 @@ def test_tree_children_obey_status_and_kind_filters(tmp_path: Path) -> None:
     assert {job["id"] for job in child_only["jobs"]} == {"c2"}  # совпавшая подзадача видна
 
 
+def test_v1_database_is_migrated_to_indexed_links(tmp_path: Path) -> None:
+    """Старая база (связи только в meta) мигрирует: колонки заполняются, дерево работает."""
+    import json as jsonlib
+    import sqlite3
+
+    from stenograph import storage as storage_module
+
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(storage_module._SCHEMA)  # схема v1: колонок ещё нет
+    conn.execute("PRAGMA user_version=1")
+    for job_id, meta in (("root1", {}), ("child1", {"parent": "root1"})):
+        conn.execute(
+            "INSERT INTO jobs (id, kind, source_name, status, meta, created_at, segments, text) "
+            "VALUES (?, 'file', ?, 'done', ?, ?, '[]', '')",
+            (job_id, job_id, jsonlib.dumps(meta), 100.0 if job_id == "root1" else 110.0),
+        )
+    conn.commit()
+    conn.close()
+
+    repo = JobRepository(db)  # открытие мигрирует базу
+
+    with repo._lock:
+        row = repo._conn.execute(
+            "SELECT parent_id FROM jobs WHERE id = 'child1'"
+        ).fetchone()
+    assert row["parent_id"] == "root1"
+
+    jobs, has_more = repo.jobs_tree_page(limit=10)
+    assert {job.id for job in jobs} == {"root1", "child1"}
+    assert has_more is False
+
+
 def test_list_is_slim_but_detail_keeps_the_transcript(tmp_path: Path) -> None:
     """Список не несёт транскрипт и тяжёлые мета; detail — несёт."""
     service = _service(tmp_path)
