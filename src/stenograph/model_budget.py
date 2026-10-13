@@ -10,7 +10,11 @@ Two mechanisms:
   model that needs memory takes it from models nobody is using.
 
 Busy tracking is a counter around ``transcribe*`` calls (the :func:`tracked`
-decorator) — an engine executing a transcribe is never unloaded. The manual
+decorator) — an engine executing a transcribe is never unloaded. Besides busy,
+engines used within the last ``_FRESH_SEC`` seconds are protected too: a live
+session's engine is only busy DURING a window batch and looks idle between
+them, so a fresh-use window is what keeps «Выгрузить простаивающие» and
+pre-load evictions from killing a model mid-meeting. The manual
 ``POST /api/models/unload`` path works even when the automatic one is off.
 """
 
@@ -25,6 +29,9 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
+
+#: Engines used less than this long ago are never evicted (any path).
+_FRESH_SEC = 60.0
 
 
 class Unloadable(Protocol):
@@ -57,22 +64,32 @@ _REAPER: threading.Thread | None = None
 _STOP = threading.Event()
 
 
-def configure(idle_sec: float, *, interval: float | None = None) -> None:
-    """Set the idle threshold (0 disables automatic eviction) and arm the reaper."""
-    global _IDLE_SEC, _REAP_INTERVAL
+def configure(
+    idle_sec: float, *, interval: float | None = None, fresh_sec: float | None = None
+) -> None:
+    """Set the idle threshold (0 disables automatic eviction) and arm the reaper.
+
+    ``fresh_sec`` overrides the fresh-use protection window (engines used more
+    recently than that are never unloaded, whatever the caller asked for);
+    ``0`` disables the protection (tests).
+    """
+    global _IDLE_SEC, _REAP_INTERVAL, _FRESH_SEC
     with _LOCK:
         _IDLE_SEC = max(0.0, float(idle_sec))
         if interval is not None:
             _REAP_INTERVAL = max(1.0, float(interval))
+        if fresh_sec is not None:
+            _FRESH_SEC = max(0.0, float(fresh_sec))
     _ensure_reaper()
 
 
 def reset() -> None:
     """Drop all registry state (tests; the reaper thread stays but goes quiet)."""
-    global _IDLE_SEC, _REAPER
+    global _IDLE_SEC, _FRESH_SEC, _REAPER
     with _LOCK:
         _ENTRIES.clear()
         _IDLE_SEC = 0.0
+        _FRESH_SEC = 60.0
         _REAPER = None
 
 
@@ -164,7 +181,10 @@ def evict_idle(
     """Unload registered engines that are not busy; returns their names.
 
     ``exclude`` — the engine that is loading right now (never unload it).
-    ``older_than`` — only engines idle at least that long (None = any idle).
+    ``older_than`` — only engines idle at least that long (None = the
+    fresh-use floor). Engines used less than ``_FRESH_SEC`` ago are never
+    victims, whatever the caller asks: a live session's engine looks idle
+    between window batches, and unloading it mid-meeting costs a reload.
     Automatic callers respect the master switch (0 = off); ``force`` is the
     manual path and bypasses it.
     """
@@ -172,6 +192,7 @@ def evict_idle(
         if not force and _IDLE_SEC <= 0:
             return []
         now = time.monotonic()
+        fresh_floor = max(older_than if older_than is not None else 0.0, _FRESH_SEC)
         victims: list[Unloadable] = []
         for key, entry in list(_ENTRIES.items()):
             engine = entry.ref()
@@ -180,7 +201,7 @@ def evict_idle(
                 continue
             if engine is exclude or entry.busy > 0:
                 continue
-            if older_than is not None and now - entry.last_used < older_than:
+            if now - entry.last_used < fresh_floor:
                 continue
             _ENTRIES.pop(key, None)  # claim: nobody else may unload it
             victims.append(engine)

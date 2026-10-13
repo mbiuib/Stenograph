@@ -124,6 +124,11 @@ class GigaAmEngine:
         """Human id for the monitor/model budget (repo@revision)."""
         return f"{self.model}@{self.revision}"
 
+    @property
+    def model_id(self) -> str:
+        """Same id the metrics registry and the busy bookkeeping use."""
+        return self.model_ref
+
     def resolve_model(self) -> str:
         """Prefer a local model directory over a Hub download."""
         if self.models_dir:
@@ -280,6 +285,7 @@ class GigaAmEngine:
         if audio.size == 0:
             return []
         text, words = self._forward_decode([np.asarray(audio, dtype=np.float32)], words=True)[0]
+        touch_engine(self)
         return words or _synth_words(text, float(audio.size) / SAMPLE_RATE)
 
     @tracked
@@ -297,6 +303,7 @@ class GigaAmEngine:
             [window if window.size else np.zeros(1, dtype=np.float32) for window in prepared],
             words=True,
         )
+        touch_engine(self)
         out: list[WindowWords] = []
         for window, (text, words) in zip(windows, results, strict=True):
             if window.size == 0:

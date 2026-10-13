@@ -148,6 +148,7 @@ def test_models_unload_endpoint_frees_idle_engines(tmp_path: Path) -> None:
     assert config["model_idle_unload_sec"] == 600.0
 
     engine = IdleEngine()
+    model_budget.configure(600.0, fresh_sec=0.0)  # изолируем защиту свежих моделей
     model_budget.mark_busy(engine)
     model_budget.mark_idle(engine)
     response = client.post("/api/models/unload")

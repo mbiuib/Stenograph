@@ -18,6 +18,7 @@ from stenograph.asr_service import advertised_engines, build_default_engine
 from stenograph.config import Settings
 from stenograph.domain.errors import JobCancelled
 from stenograph.engines import available_asr
+from stenograph.engines import gigaam as gigaam_module
 from stenograph.engines.base import NoSpeechError, TranscribeOptions
 from stenograph.engines.gigaam import GigaAmEngine, _synth_words, split_on_silence
 from stenograph.live import manager as live_manager
@@ -170,6 +171,16 @@ def test_batch_windows_share_one_encoder_pass(tmp_path, monkeypatch) -> None:
     assert out[0][-1][1] == pytest.approx(1.0)
     assert out[1][-1][1] == pytest.approx(2.0)
     assert engine._load().model.batch_rows == [2]
+
+
+def test_live_paths_touch_metrics(tmp_path, monkeypatch) -> None:
+    """Окна и батч обновляют «последнее использование» — иначе Монитор врёт."""
+    engine = _engine(monkeypatch, tmp_path)
+    calls: list[object] = []
+    monkeypatch.setattr(gigaam_module, "touch_engine", calls.append)
+    engine.transcribe_window(np.zeros(RATE, np.float32))
+    engine.transcribe_batch([np.zeros(RATE, np.float32), np.zeros(2 * RATE, np.float32)])
+    assert calls == [engine, engine]
 
 
 def test_synth_words_spreads_evenly() -> None:

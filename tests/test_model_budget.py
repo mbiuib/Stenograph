@@ -43,7 +43,7 @@ def test_idle_engine_is_evicted_after_the_timeout() -> None:
     assert engine.transcribe() == "ok"
 
     assert model_budget.tick() == []  # idle, but not long enough
-    model_budget.configure(0.01)
+    model_budget.configure(0.01, fresh_sec=0)
     time.sleep(0.05)
     assert model_budget.tick() == ["fake:model-x"]
     assert engine.unloaded == 1
@@ -53,7 +53,7 @@ def test_idle_engine_is_evicted_after_the_timeout() -> None:
 def test_busy_engine_is_never_evicted() -> None:
     """A transcribe in flight protects the engine from eviction."""
     engine = FakeEngine()
-    model_budget.configure(0.01)
+    model_budget.configure(0.01, fresh_sec=0)
     model_budget.mark_busy(engine)
     time.sleep(0.05)
     assert model_budget.tick() == []
@@ -65,11 +65,24 @@ def test_busy_engine_is_never_evicted() -> None:
     assert engine.unloaded == 1
 
 
+def test_recently_used_engine_survives_even_the_forced_path() -> None:
+    """Свежая модель защищена: движок встречи между окнами выглядит простым."""
+    engine = FakeEngine()
+    model_budget.configure(600, fresh_sec=0.05)
+    engine.transcribe()  # только что работал
+    assert model_budget.evict_idle(force=True) == []  # свежая — защищена
+    assert engine.unloaded == 0
+
+    time.sleep(0.1)  # окно защиты прошло
+    assert model_budget.evict_idle(force=True) == ["fake:model-x"]
+    assert engine.unloaded == 1
+
+
 def test_disabled_feature_only_allows_the_forced_path() -> None:
     """0 turns automatic eviction off; the manual (force) path still works."""
     engine = FakeEngine()
     engine.transcribe()
-    model_budget.configure(0)
+    model_budget.configure(0, fresh_sec=0)
     assert model_budget.tick() == []
     assert model_budget.evict_idle() == []
     assert model_budget.evict_idle(force=True) == ["fake:model-x"]
@@ -80,7 +93,7 @@ def test_eviction_excludes_the_loading_engine() -> None:
     """The engine that is loading right now is never a victim."""
     loading = FakeEngine("whisper", "large-v3")
     idle = FakeEngine("moss", "moss-model")
-    model_budget.configure(600)
+    model_budget.configure(600, fresh_sec=0)
     model_budget.mark_busy(loading)
     idle.transcribe()
 
@@ -127,7 +140,7 @@ def test_whisper_load_evicts_idle_models_and_unload_frees(monkeypatch) -> None:
         "stenograph.engines.whisper.note_model_unloaded",
         lambda engine, model: recorded.append((engine, model)),
     )
-    model_budget.configure(600)
+    model_budget.configure(600, fresh_sec=0)
 
     bystander = FakeEngine("moss", "moss-idle")
     bystander.transcribe()  # registered + idle

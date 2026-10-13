@@ -109,7 +109,7 @@ def test_moss_load_evicts_idle_models_first(monkeypatch) -> None:
     """The loading engine takes the memory of models sitting idle."""
     state = {"live": 0, "max_live": 0, "calls": 0}
     _install_fake_transformers(monkeypatch, state)
-    model_budget.configure(600)
+    model_budget.configure(600, fresh_sec=0)
     bystander = _BystanderEngine()
     model_budget.mark_busy(bystander)
     model_budget.mark_idle(bystander)  # registered, idle
