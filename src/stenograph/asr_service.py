@@ -63,8 +63,13 @@ class EnginePool:
         self._engines: dict[str, AsrEngine] = {}
         self._call_locks: dict[str, threading.Lock] = {}
 
+    # gigaam-live — тот же самый движок, что gigaam: без канонизации сервис
+    # держал бы по копии модели на каждый алиас (файлы + окна = две копии VRAM).
+    _POOL_ALIASES = {"gigaam-live": "gigaam"}
+
     def get(self, name: str) -> tuple[AsrEngine, threading.Lock]:
         """Engine instance and its call lock; KeyError for an unknown name."""
+        name = self._POOL_ALIASES.get(name, name)
         with self._lock:
             engine = self._engines.get(name)
             if engine is None:
