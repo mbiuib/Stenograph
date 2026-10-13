@@ -39,10 +39,10 @@ ASR- и диаризация-движки подключаются за прот
 ```mermaid
 flowchart LR
     subgraph local["local — один процесс"]
-        srv1["Сервер Стенографа"] --> eng1["Движки whisper/moss<br/>в своём процессе"]
+        srv1["Сервер Стенографа"] --> eng1["Движки whisper · moss · gigaam<br/>в своём процессе"]
     end
     subgraph remote["remote — два процесса (так работает docker-стек)"]
-        srv2["Сервер Стенографа<br/>(моделей не грузит)"] -- "HTTP<br/>/v1/audio/transcriptions<br/>/v1/realtime/windows" --> svc["ASR-сервис<br/>whisper + moss"]
+        srv2["Сервер Стенографа<br/>(моделей не грузит)"] -- "HTTP<br/>/v1/audio/transcriptions<br/>/v1/realtime/windows" --> svc["ASR-сервис<br/>whisper · moss · gigaam"]
     end
 ```
 
@@ -106,6 +106,15 @@ faster-whisper (`BatchedInferencePipeline` без VAD) — при обновле
 косинусу; кластеры короче 10 с речи приклеиваются к ближайшему похожему, иначе
 сохраняются отдельными. Одночанковые записи не затрагиваются. При ошибке
 эмбеддера — warning и локальные метки (транскрибация не падает).
+
+**gigaam** (ai-sage/GigaAM-Multilingual). Conformer + символьный CTC, 70+
+языков (лучшие открытые результаты для ru/kk/ky/uz, умеренные для en). Файлы
+режутся на чанки ≤ `gigaam_chunk_sec` с поиском тихого места на границе —
+штатный longform модели требует gated-модель pyannote, поэтому не
+используется. Окна Live/Jitsi идут в энкодер тензором напрямую (без временных
+файлов и ffmpeg), слова — из CTC-кадров. В remote-режиме сервис отвечает на
+алиас `gigaam-live`; настройка `live_engine` выбирает движок окон (whisper или
+gigaam).
 
 **remote**. Дроп-ин замена движков: файл уходит целиком
 (`/v1/audio/transcriptions`), окна realtime — батчами (`/v1/realtime/windows`).

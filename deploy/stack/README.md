@@ -20,7 +20,7 @@ flowchart LR
         jvb["jvb :10000/udp"]
         jigasi["transcriber (jigasi)"]
         server["stenograph<br/>:443 — UI · API · WSS"]
-        asr["asr<br/>:9001 — whisper + moss"]
+        asr["asr<br/>:9001 — whisper · moss · gigaam"]
     end
 
     gpu[("NVIDIA GPU")]
@@ -49,7 +49,7 @@ flowchart LR
 | `web`, `prosody`, `jicofo`, `jvb` | Jitsi с локального стенда (docker-jitsi-meet) | `8081` (http), `8443` (https), `10000/udp` |
 | `transcriber` | jigasi — передаёт звук комнат на мост Стенографа | — |
 | `stenograph` | сервер: UI + API + мост | `443` |
-| `asr` | ASR-сервис (whisper + moss) | `127.0.0.1:9001` (только loopback) |
+| `asr` | ASR-сервис (whisper, moss, gigaam) | `127.0.0.1:9001` (только loopback) |
 
 ## Как это связано
 
@@ -74,7 +74,7 @@ flowchart LR
 | `..\..\certs` | `/app/certs` | TLS-сертификат сервера |
 | `..\..\.env` | `/app/.env` | настройки `MEETSCRIBE_*` (читаются, не пишутся) |
 | `..\jitsi-windows\config` | тома Jitsi | состояние стенда: prosody, jvb, jigasi, ключи |
-| папка моделей (`STENOGRAPH_MODELS_DIR`) | `/models` | модели whisper/moss: rw для `asr`, ro для `stenograph` |
+| папка моделей (`STENOGRAPH_MODELS_DIR`) | `/models` | модели whisper/moss/gigaam: rw для `asr`, ro для `stenograph` |
 
 ## Запуск
 
@@ -159,6 +159,11 @@ docker compose --env-file ../jitsi-windows/.env -f docker-compose.yml up -d --bu
   (VRAM/RAM/простой; кнопка «Выгрузить простаивающие» работает через прокси);
   GPU в верхних карточках берётся из сервиса — в контейнере сервера nvidia-smi
   нет.
+- **Движок `gigaam`** (ai-sage/GigaAM-Multilingual): файлы модели положите в
+  `<папка моделей>/GigaAM-Multilingual` —
+  `huggingface-cli download ai-sage/GigaAM-Multilingual --revision ctc --local-dir "<папка моделей>/GigaAM-Multilingual"`
+  (иначе сервис скачает их в HF-кэш контейнера, и пересборка образа их
+  потеряет). Для окон Live/Jitsi — `MEETSCRIBE_LIVE_ENGINE=gigaam` в `.env`.
 - **LLM из контейнеров** идёт на `host.docker.internal:1234`; при выключенном
   «Serve on Local Network» Монитор честно покажет «не отвечает».
 - Контейнер `stenograph` работает только в remote-режиме (локальные модели — это
