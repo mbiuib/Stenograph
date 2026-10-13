@@ -40,23 +40,32 @@ EXTRACT_UNTIL = 5  # ... and for audio extraction
 ASR_UNTIL = 99  # ASR fills everything up to this
 REPROCESS_UNTIL = 99  # reprocess spreads track progress up to this
 ANALYSIS_UNTIL = 99  # analysis spreads LLM step progress up to this
-PROGRESS_SAVE_SEC = 1.0  # throttle for repository writes during progress ticks
+PROGRESS_SAVE_SEC = 1.0  # throttle for narrow progress writes during ticks
+FULL_SAVE_SEC = 15.0  # как часто переписывать джоб целиком (транскрипт, мета)
 
 
 def _progress_saver(repo: JobRepository, job: Job) -> Callable[[], None]:
-    """Repository write throttled to PROGRESS_SAVE_SEC for progress ticks.
+    """Repository writes throttled to PROGRESS_SAVE_SEC for progress ticks.
 
-    The job list polls the REST API, which reads the repository — progress
-    must be persisted, but not on every engine tick; once a second is plenty.
+    Тики прогресса — узкий UPDATE позиции (progress/message): полный ``save``
+    на каждый тик переписывал сегменты и текст через общий лок, и очередь,
+    метрики со списками ждали его в очереди. Полная запись случается не чаще
+    FULL_SAVE_SEC и на переходах статуса (там ``transition`` зовёт save).
     """
-    last = 0.0
+    last_tick = 0.0
+    last_full = 0.0
 
     def save() -> None:
-        nonlocal last
+        nonlocal last_tick, last_full
         now = time.time()
-        if now - last >= PROGRESS_SAVE_SEC:
-            last = now
+        if now - last_tick < PROGRESS_SAVE_SEC:
+            return
+        last_tick = now
+        if now - last_full >= FULL_SAVE_SEC:
+            last_full = now
             repo.save(job)
+        else:
+            repo.update_progress(job.id, job.progress, job.message)
 
     return save
 

@@ -12,6 +12,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from .domain.models import Job, JobStatus
@@ -83,7 +84,7 @@ _SLIM_COLUMNS = (
 #: чипы, очередь). Всё тяжёлое (audio, tracks, analysis с текстом) остаётся
 #: только detail-запросу.
 LIST_META_KEYS = frozenset(
-    {"parent", "retry_of", "source_kind", "engine", "analysis_type", "duration", "speakers"}
+    {"parent", "retry_of", "source_kind", "engine", "analysis_type", "duration", "speakers", "auto"}
 )
 
 
@@ -159,6 +160,43 @@ class JobRepository:
                 f"SELECT {_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
         return _row_to_job(row) if row else None
+
+    def get_slim(self, job_id: str) -> Job | None:
+        """Fetch one job without the transcript or heavy meta (queue use)."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_SLIM_COLUMNS} FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return _row_to_job(row, slim=True) if row else None
+
+    def get_many(self, job_ids: Sequence[str], *, slim: bool = True) -> dict[str, Job]:
+        """Fetch several jobs in ONE query — без N+1 под общим локом.
+
+        Очередь и воркеры читают десятки задач на каждый опрос; отдельные
+        ``get`` на каждую задачу под глобальным локом выстраивают лавину,
+        из-за которой страницы ждут секундами.
+        """
+        if not job_ids:
+            return {}
+        columns = _SLIM_COLUMNS if slim else _COLUMNS
+        marks = ", ".join("?" * len(job_ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {columns} FROM jobs WHERE id IN ({marks})", list(job_ids)
+            ).fetchall()
+        return {row["id"]: _row_to_job(row, slim=slim) for row in rows}
+
+    def update_progress(self, job_id: str, progress: int, message: str) -> None:
+        """Narrow write for progress ticks: не переписывает транскрипт и мета.
+
+        Полный ``save`` на каждый тик progress гоняет мегабайты сегментов
+        через общий лок — очередь и метрики ждут; тик трогает лишь позицию.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET progress = ?, message = ? WHERE id = ?",
+                (progress, message, job_id),
+            )
 
     def list_jobs(
         self,

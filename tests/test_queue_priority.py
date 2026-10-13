@@ -78,3 +78,30 @@ def test_chain_reprocess_marks_the_child_auto(
     manual = service.reprocess_job(manual_live)
     assert manual.meta.get("auto") is None
     assert queue_priority(manual) == PRIORITY_REPROCESS
+
+
+def test_queue_reads_are_batched_not_per_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Очередь и выбор воркера читают БД пакетно, а не по одному get на задачу.
+
+    Фальсификация: с per-id repo.get (как было) любой вызов очереди после
+    подмены падает с AssertionError, и тест не доходит до проверок.
+    """
+    service = _make_service(tmp_path, monkeypatch)
+    jobs = [Job(kind="file", source_name=f"файл {i}") for i in range(5)]
+    for job in jobs:
+        service._enqueue(job)
+
+    def _no_per_id_reads(job_id: str) -> None:
+        raise AssertionError(f"per-id repo.get({job_id}): очередь обязана читать пакетно")
+
+    monkeypatch.setattr(service.repo, "get", _no_per_id_reads)
+
+    view = service.queue_view()
+    assert len(view["waiting"]) == 5
+
+    best = service._peek_queued()
+    assert best in {job.id for job in jobs}
+    assert service._claim_queued(best) is True
+    assert len(service.queue_view()["waiting"]) == 4

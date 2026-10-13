@@ -10,7 +10,7 @@ from stenograph.domain.errors import JobCancelled
 from stenograph.domain.models import Job, JobStatus, Segment
 from stenograph.engines.base import AsrResult, TranscribeOptions, TranscribeProgress
 from stenograph.events import EventBus
-from stenograph.pipeline import ASR_UNTIL, EXTRACT_UNTIL, run_file_job
+from stenograph.pipeline import ASR_UNTIL, EXTRACT_UNTIL, _progress_saver, run_file_job
 from stenograph.storage import JobRepository
 
 
@@ -116,6 +116,49 @@ def test_file_pipeline_persists_progress_for_list_polling(
     ]
     assert seen == expected
     assert job.status == JobStatus.DONE
+
+
+def test_progress_saver_writes_narrow_ticks_and_rare_full_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Тики прогресса — узкий UPDATE; полная запись — не чаще FULL_SAVE_SEC.
+
+    Фальсификация: с полным save на каждый тик счётчик saves растёт — тест падает.
+    """
+    clock = {"t": 100.0}
+    monkeypatch.setattr("stenograph.pipeline.time.time", lambda: clock["t"])
+
+    class _ProbeRepo:
+        def __init__(self) -> None:
+            self.saves = 0
+            self.updates: list[tuple[str, int, str]] = []
+
+        def save(self, job: Job) -> None:
+            self.saves += 1
+
+        def update_progress(self, job_id: str, progress: int, message: str) -> None:
+            self.updates.append((job_id, progress, message))
+
+    repo = _ProbeRepo()
+    job = Job(source_name="t.wav")
+    saver = _progress_saver(repo, job)  # type: ignore[arg-type]
+
+    saver()  # первый тик — полная запись
+    assert repo.saves == 1 and repo.updates == []
+
+    for step in range(1, 4):  # три узких тика раз в секунду
+        clock["t"] = 100.0 + step
+        job.progress = 5 + step
+        saver()
+    assert repo.saves == 1 and len(repo.updates) == 3
+
+    clock["t"] = 120.0  # прошло больше FULL_SAVE_SEC — снова полная
+    saver()
+    assert repo.saves == 2 and len(repo.updates) == 3
+
+    clock["t"] = 120.4  # троттлинг: чаще раза в секунду не пишем
+    saver()
+    assert repo.saves == 2 and len(repo.updates) == 3
 
 
 def test_pipeline_runs_to_completion(tmp_path: Path) -> None:

@@ -454,10 +454,13 @@ class TranscriptionService:
         with self._lock:
             active_ids = list(self._active_ids)
             waiting_ids = list(self._waiting)
-        active_jobs = [job for job in (self.repo.get(item) for item in active_ids) if job]
+        # Один запрос на всю очередь: по одному get на задачу под общим
+        # локом опросы UI выстраивались в лавину и ждали секундами.
+        found = self.repo.get_many([*active_ids, *waiting_ids], slim=True)
+        active_jobs = [found[item] for item in active_ids if item in found]
         active = active_jobs[0] if active_jobs else None
         waiting = sorted(
-            (job for job in (self.repo.get(item) for item in waiting_ids) if job),
+            (found[item] for item in waiting_ids if item in found),
             key=queue_priority,  # display order == execution order
         )
         return {"active": active, "active_jobs": active_jobs, "waiting": waiting}
@@ -615,8 +618,11 @@ class TranscriptionService:
             best_id: str | None = None
             best_rank = 0
             stale: list[str] = []
+            # Один запрос на весь пул ожидания: воркеры заглядывают сюда
+            # каждый цикл, и per-id чтения под общим локом зря его грели.
+            found = self.repo.get_many(self._waiting, slim=True)
             for job_id in self._waiting:
-                job = self.repo.get(job_id)
+                job = found.get(job_id)
                 if job is None or job.status != JobStatus.QUEUED:
                     stale.append(job_id)
                     continue
@@ -636,7 +642,7 @@ class TranscriptionService:
         with self._lock:
             if job_id not in self._waiting:
                 return False
-            job = self.repo.get(job_id)
+            job = self.repo.get_slim(job_id)
             if job is None or job.status != JobStatus.QUEUED:
                 self._waiting.remove(job_id)
                 return False
