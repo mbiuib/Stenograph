@@ -18,7 +18,7 @@ from .domain.models import Job, JobStatus
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,
@@ -52,6 +52,19 @@ UPDATE jobs SET
     retry_of_id = json_extract(meta, '$.retry_of');
 CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs(parent_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_retry_of ON jobs(retry_of_id);
+"""
+
+#: v3: частичные индексы «только корни». Поиск корней через idx_jobs_created
+#: заставляет планировщик трогать строку таблицы на каждого кандидата (детей
+#: почти половина!, а чтение строк через bind-mount докера дорогое); частичные
+#: индексы отсекают детей, не выходя из индекса. Отдельный индекс под вкладки
+#: статуса (status первым ключом — равенство + порядок в одном индексе).
+_SCHEMA_V3 = """
+CREATE INDEX IF NOT EXISTS idx_jobs_roots
+    ON jobs(created_at DESC, id DESC) WHERE parent_id IS NULL AND retry_of_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_jobs_roots_status
+    ON jobs(status, created_at DESC, id DESC)
+    WHERE parent_id IS NULL AND retry_of_id IS NULL;
 """
 
 _COLUMNS = (
@@ -94,6 +107,9 @@ class JobRepository:
             if version < 2:
                 self._conn.executescript(_SCHEMA_V2)
                 log.info("database migrated to schema v2 (parent/retry_of columns)")
+            if version < 3:
+                self._conn.executescript(_SCHEMA_V3)
+                log.info("database migrated to schema v3 (partial roots index)")
             if version < _SCHEMA_VERSION:
                 self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                 log.info("initialized database schema v%d", _SCHEMA_VERSION)
@@ -194,8 +210,21 @@ class JobRepository:
             root_where.append("(created_at < ? OR (created_at = ? AND id < ?))")
             root_params.extend([before[0], before[0], before[1]])
         with self._lock:
+            indexed_by = ""
+            if not kind and not query:
+                # Планировщик сам выбирал idx_jobs_retry_of и добирал строки
+                # таблицы на каждого кандидата — под нагрузкой bind-mount это
+                # сотни миллисекунд. Частичные индексы корней дают потоковую
+                # выборку в порядке created_at с заходом в таблицу только за
+                # двадцатью найденными строками.
+                indexed_by = (
+                    " INDEXED BY idx_jobs_roots_status"
+                    if status is not None
+                    else " INDEXED BY idx_jobs_roots"
+                )
             rows = self._conn.execute(
-                f"SELECT {_SLIM_COLUMNS} FROM jobs WHERE {' AND '.join(root_where)} "
+                f"SELECT {_SLIM_COLUMNS} FROM jobs{indexed_by} "
+                f"WHERE {' AND '.join(root_where)} "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 [*root_params, limit + 1],
             ).fetchall()

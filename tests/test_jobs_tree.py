@@ -137,6 +137,29 @@ def test_v1_database_is_migrated_to_indexed_links(tmp_path: Path) -> None:
     assert has_more is False
 
 
+def test_roots_query_uses_the_partial_index(tmp_path: Path) -> None:
+    """План корневого запроса опирается на частичный индекс idx_jobs_roots."""
+    repo = JobRepository(tmp_path / "plan.db")
+    with repo._lock:
+        plan = repo._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id, created_at FROM jobs INDEXED BY idx_jobs_roots "
+            "WHERE parent_id IS NULL AND retry_of_id IS NULL "
+            "ORDER BY created_at DESC, id DESC LIMIT 21"
+        ).fetchall()
+        plan_status = repo._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id, created_at FROM jobs INDEXED BY idx_jobs_roots_status "
+            "WHERE parent_id IS NULL AND retry_of_id IS NULL AND status = 'done' "
+            "ORDER BY created_at DESC, id DESC LIMIT 21"
+        ).fetchall()
+    detail = " ".join(str(row["detail"]) for row in plan)
+    assert "idx_jobs_roots" in detail, detail
+    assert not any("TEMP B-TREE" in str(row["detail"]) for row in plan), detail
+    detail_status = " ".join(str(row["detail"]) for row in plan_status)
+    assert "idx_jobs_roots_status" in detail_status, detail_status
+
+
 def test_list_is_slim_but_detail_keeps_the_transcript(tmp_path: Path) -> None:
     """Список не несёт транскрипт и тяжёлые мета; detail — несёт."""
     service = _service(tmp_path)
