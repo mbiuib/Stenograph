@@ -44,7 +44,7 @@ from ..bridge.manager import BridgeManager
 from ..bridge.protocol import FrameError, is_eof, parse_frame
 from ..bridge.session import MeetingSession
 from ..config import Settings, get_settings
-from ..domain.models import JobStatus
+from ..domain.models import Job, JobStatus
 from ..engines import available_asr
 from ..events import EventBus
 from ..live.capture import CaptureError, capture_supported, describe_devices
@@ -52,8 +52,23 @@ from ..live.manager import LiveManager
 from ..live.web import parse_upload_frame
 from ..service import TranscriptionService, build_default_service
 from ..settings_service import SettingsService
+from ..storage import LIST_META_KEYS
 
 log = logging.getLogger(__name__)
+
+
+def slim_job(job: Job) -> dict:
+    """Списочный вид задачи: без транскрипта и тяжёлых метаданных.
+
+    Списку и метрикам нужны имя, статус, прогресс и «лёгкие» мета (дерево,
+    чипы, очередь); сегменты и карты дорожек остаются detail-запросу.
+    """
+    data = job.model_dump()
+    data["text"] = ""
+    data["segments"] = []
+    meta = data.get("meta") or {}
+    data["meta"] = {key: value for key, value in meta.items() if key in LIST_META_KEYS}
+    return data
 
 
 class JobUpdate(BaseModel):
@@ -176,10 +191,47 @@ def create_app(
 
     @app.get("/api/jobs")
     def list_jobs(status: str | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
-        """List recent jobs, newest first."""
+        """List recent jobs, newest first (списочный вид: без транскрипта)."""
         status_enum = JobStatus(status) if status else None
-        jobs = service.list_jobs(status=status_enum, limit=limit, offset=offset)
-        return [job.model_dump() for job in jobs]
+        jobs = service.list_jobs(status=status_enum, limit=limit, offset=offset, slim=True)
+        return [slim_job(job) for job in jobs]
+
+    @app.get("/api/jobs/tree")
+    def jobs_tree(
+        status: str | None = None,
+        kind: str | None = None,
+        q: str | None = None,
+        limit: int = 20,
+        before: str | None = None,
+    ) -> dict:
+        """One page of top-level jobs with their children (jobs-page scroll).
+
+        ``before`` — курсор «created_at:id» из предыдущей страницы: следующая
+        страница строго старше; дети едут вместе со своими корнями.
+        """
+        status_enum = JobStatus(status) if status else None
+        cursor: tuple[float, str] | None = None
+        if before:
+            created, _, anchor = before.partition(":")
+            cursor = (float(created), anchor)
+        jobs, has_more = service.jobs_tree_page(
+            status=status_enum,
+            kind=kind or None,
+            query=(q or "").strip() or None,
+            limit=max(1, min(limit, 100)),
+            before=cursor,
+        )
+        next_before = None
+        if has_more:
+            for job in reversed(jobs):
+                if not job.meta.get("parent") and not job.meta.get("retry_of"):
+                    next_before = f"{job.created_at}:{job.id}"
+                    break
+        return {
+            "jobs": [slim_job(job) for job in jobs],
+            "has_more": has_more,
+            "next_before": next_before,
+        }
 
     @app.post("/api/jobs", status_code=201)
     async def create_job(
@@ -463,9 +515,9 @@ def create_app(
         view = service.queue_view()
         active = view["active"]
         return {
-            "active": active.model_dump() if active else None,
-            "active_jobs": [job.model_dump() for job in view.get("active_jobs", [])],
-            "waiting": [job.model_dump() for job in view["waiting"]],
+            "active": slim_job(active) if active else None,
+            "active_jobs": [slim_job(job) for job in view.get("active_jobs", [])],
+            "waiting": [slim_job(job) for job in view["waiting"]],
         }
 
     @app.get("/api/stats")
@@ -496,9 +548,9 @@ def create_app(
             live=live.status(),
             bridge=bridge.status(),
             queue={
-                "active": view["active"].model_dump() if view["active"] else None,
-                "active_jobs": [job.model_dump() for job in view.get("active_jobs", [])],
-                "waiting": [job.model_dump() for job in view["waiting"]],
+                "active": slim_job(view["active"]) if view["active"] else None,
+                "active_jobs": [slim_job(job) for job in view.get("active_jobs", [])],
+                "waiting": [slim_job(job) for job in view["waiting"]],
             },
             counts=service.repo.count_by_status(),
         )

@@ -46,6 +46,20 @@ _COLUMNS = (
     "text, segments, error, meta, created_at, started_at, finished_at"
 )
 
+#: Списочные запросы не читают текст/сегменты вовсе (транскрипты бывают на
+#: мегабайты, а списку задач и метрикам они не нужны).
+_SLIM_COLUMNS = (
+    "id, kind, source_name, source_path, status, progress, message, language, "
+    "error, meta, created_at, started_at, finished_at"
+)
+
+#: Метаданные, которые реально используют списочные экраны (дерево задач,
+#: чипы, очередь). Всё тяжёлое (audio, tracks, analysis с текстом) остаётся
+#: только detail-запросу.
+LIST_META_KEYS = frozenset(
+    {"parent", "retry_of", "source_kind", "engine", "analysis_type", "duration", "speakers"}
+)
+
 
 class JobRepository:
     """Thread-safe job storage on top of sqlite3."""
@@ -108,10 +122,16 @@ class JobRepository:
         return _row_to_job(row) if row else None
 
     def list_jobs(
-        self, *, status: JobStatus | None = None, limit: int = 100, offset: int = 0
+        self,
+        *,
+        status: JobStatus | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        slim: bool = False,
     ) -> list[Job]:
-        """List jobs, newest first."""
-        query = f"SELECT {_COLUMNS} FROM jobs"
+        """List jobs, newest first; ``slim`` skips transcripts and heavy meta."""
+        columns = _SLIM_COLUMNS if slim else _COLUMNS
+        query = f"SELECT {columns} FROM jobs"
         params: list[object] = []
         if status is not None:
             query += " WHERE status = ?"
@@ -120,7 +140,90 @@ class JobRepository:
         params.extend([limit, offset])
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
-        return [_row_to_job(row) for row in rows]
+        return [_row_to_job(row, slim=slim) for row in rows]
+
+    def jobs_tree_page(
+        self,
+        *,
+        status: JobStatus | None = None,
+        kind: str | None = None,
+        query: str | None = None,
+        limit: int = 20,
+        before: tuple[float, str] | None = None,
+    ) -> tuple[list[Job], bool]:
+        """One page of top-level jobs plus every descendant they carry.
+
+        ``before`` — cursor ``(created_at, id)`` of the last root of the
+        previous page: the next page starts strictly older. Descendants are
+        attached through ``meta.parent``/``meta.retry_of`` recursively and
+        obey the same status/kind/query filters (что видит UI).
+        """
+        root_where = [
+            "json_extract(meta, '$.parent') IS NULL",
+            "json_extract(meta, '$.retry_of') IS NULL",
+        ]
+        if kind or query:
+            # Режимы «тип» и «поиск»: страница строится по ВСЕМ совпадениям, а
+            # не по корням — у улучшений/анализов есть родители другого типа,
+            # а совпавшая подзадача не должна теряться из-за несовпадения
+            # родителя (клиент сам вложит её, если родитель тоже в выборке).
+            root_where = []
+        root_params: list[object] = []
+        self._apply_filters(root_where, root_params, status, kind, query)
+        if before is not None:
+            root_where.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            root_params.extend([before[0], before[0], before[1]])
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_SLIM_COLUMNS} FROM jobs WHERE {' AND '.join(root_where)} "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                [*root_params, limit + 1],
+            ).fetchall()
+            roots = rows[:limit]
+            has_more = len(rows) > limit
+
+            collected: dict[str, sqlite3.Row] = {row["id"]: row for row in roots}
+            frontier = [row["id"] for row in roots]
+            while frontier:
+                marks = ",".join("?" * len(frontier))
+                child_where = [
+                    f"(json_extract(meta, '$.parent') IN ({marks}) "
+                    f"OR json_extract(meta, '$.retry_of') IN ({marks}))"
+                ]
+                child_params: list[object] = [*frontier, *frontier]
+                self._apply_filters(child_where, child_params, status, kind, query)
+                children = self._conn.execute(
+                    f"SELECT {_SLIM_COLUMNS} FROM jobs WHERE {' AND '.join(child_where)} "
+                    "ORDER BY created_at DESC",
+                    child_params,
+                ).fetchall()
+                frontier = []
+                for row in children:
+                    if row["id"] not in collected:
+                        collected[row["id"]] = row
+                        frontier.append(row["id"])
+        jobs = [_row_to_job(row, slim=True) for row in collected.values()]
+        jobs.sort(key=lambda job: job.created_at, reverse=True)
+        return jobs, has_more
+
+    @staticmethod
+    def _apply_filters(
+        where: list[str],
+        params: list[object],
+        status: JobStatus | None,
+        kind: str | None,
+        query: str | None,
+    ) -> None:
+        """Append status/kind/name filters shared by roots and children."""
+        if status is not None:
+            where.append("status = ?")
+            params.append(str(status))
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        if query:
+            where.append("source_name LIKE ?")
+            params.append(f"%{query}%")
 
     def delete(self, job_id: str) -> None:
         """Remove a job."""
@@ -181,8 +284,15 @@ class JobRepository:
         return [{"engine": row["engine"], "jobs": row["jobs"]} for row in rows]
 
 
-def _row_to_job(row: sqlite3.Row) -> Job:
-    """Map a database row back to a Job model."""
+def _row_to_job(row: sqlite3.Row, *, slim: bool = False) -> Job:
+    """Map a database row back to a Job model.
+
+    ``slim`` — список: без транскрипта (колонки text/segments не читаются
+    вовсе) и только списочные метаданные.
+    """
+    meta = json.loads(row["meta"] or "{}")
+    if slim:
+        meta = {key: value for key, value in meta.items() if key in LIST_META_KEYS}
     return Job(
         id=row["id"],
         kind=row["kind"],
@@ -192,10 +302,10 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         progress=row["progress"],
         message=row["message"],
         language=row["language"],
-        text=row["text"],
-        segments=json.loads(row["segments"] or "[]"),
+        text="" if slim else row["text"],
+        segments=[] if slim else json.loads(row["segments"] or "[]"),
         error=row["error"],
-        meta=json.loads(row["meta"] or "{}"),
+        meta=meta,
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],

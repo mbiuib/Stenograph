@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { IconChevron, IconOpen, IconTrash, IconX } from "../components/Icons";
@@ -58,14 +58,83 @@ export function JobsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const { data: jobs, error } = usePolling(() => api.listJobs(tab || undefined, 300), 3000);
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const filters = useMemo(
+    () => ({ status: tab || undefined, kind: kind || undefined, q: debouncedQuery || undefined }),
+    [tab, kind, debouncedQuery],
+  );
+  const filtersKey = `${filters.status ?? ""}|${filters.kind ?? ""}|${filters.q ?? ""}`;
+  const PAGE_SIZE = 20;
+  const first = usePolling(() => api.jobsTree({ ...filters, limit: PAGE_SIZE }), 4000);
+  const [olderPages, setOlderPages] = useState<
+    { jobs: Job[]; next: string | null; hasMore: boolean }[]
+  >([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  useEffect(() => {
+    setOlderPages([]); // смена фильтров — список начинается заново
+  }, [filtersKey]);
+
+  const tail = olderPages.length > 0 ? olderPages[olderPages.length - 1] : null;
+  const nextCursor = tail ? tail.next : (first.data?.next_before ?? null);
+  const hasMore = tail ? tail.hasMore : (first.data?.has_more ?? false);
+
+  const loadMoreRef = useRef<() => void>(() => {});
+  loadMoreRef.current = () => {
+    if (loadingMore || !hasMore || !nextCursor) return;
+    setLoadingMore(true);
+    void api
+      .jobsTree({ ...filters, limit: PAGE_SIZE, before: nextCursor })
+      .then((page) =>
+        setOlderPages((pages) => [
+          ...pages,
+          { jobs: page.jobs, next: page.next_before, hasMore: page.has_more },
+        ]),
+      )
+      .catch(() => {}) // моргнула сеть — доберём при следующем скролле
+      .finally(() => setLoadingMore(false));
+  };
+
+  // Страж внизу списка: появился во вьюпорте — догружаем следующую страницу.
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const setSentinel = (node: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (node && typeof IntersectionObserver !== "undefined") {
+      observerRef.current = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) loadMoreRef.current();
+        },
+        { rootMargin: "400px" },
+      );
+      observerRef.current.observe(node);
+    }
+  };
+
+  // Первая страница обновляется опросом, старшие — доклеиваются прокруткой.
+  const jobs = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Job[] = [];
+    const push = (list: Job[] | undefined) => {
+      for (const job of list ?? []) {
+        if (!seen.has(job.id)) {
+          seen.add(job.id);
+          out.push(job);
+        }
+      }
+    };
+    push(first.data?.jobs);
+    for (const page of olderPages) push(page.jobs);
+    return out;
+  }, [first.data, olderPages]);
+  const error = first.error;
   const navigate = useNavigate();
 
-  const filtered = (jobs ?? []).filter(
-    (job) =>
-      (!kind || job.kind === kind) &&
-      job.source_name.toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const filtered = jobs; // статус/тип/поиск применяет сервер — тут уже отфильтровано
 
   // Дерево: подзадачи (улучшения, повторы, резюме/протоколы) вкладываются в свои задачи.
   const byId = new Map(filtered.map((job) => [job.id, job]));
@@ -292,7 +361,16 @@ export function JobsPage() {
         {filtered.length === 0 ? (
           <EmptyState title="Ничего не найдено" hint="Измените фильтр или загрузите файл." />
         ) : (
-          <ul className="divide-y divide-edge/60">{roots.map((job) => renderJob(job, 0))}</ul>
+          <>
+            <ul className="divide-y divide-edge/60">{roots.map((job) => renderJob(job, 0))}</ul>
+            <div ref={setSentinel} className="px-4 py-3 text-center text-xs text-muted">
+              {hasMore
+                ? loadingMore
+                  ? "Загружаем ещё…"
+                  : "Прокрутите вниз — подгрузим ещё"
+                : "Это все задачи"}
+            </div>
+          </>
         )}
       </Card>
     </div>

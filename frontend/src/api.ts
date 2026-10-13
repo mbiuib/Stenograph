@@ -5,6 +5,7 @@ import type {
   EngineList,
   JitsiStatus,
   Job,
+  JobsTreePage,
   LiveDevices,
   LiveStatus,
   MetricsSnapshot,
@@ -28,6 +29,23 @@ export const api = {
     const params = new URLSearchParams({ limit: String(limit) });
     if (status) params.set("status", status);
     return request<Job[]>(`/api/jobs?${params.toString()}`);
+  },
+
+  /** Страница дерева задач: корни с детьми, курсор — в конец предыдущей. */
+  jobsTree: (params: {
+    status?: string;
+    kind?: string;
+    q?: string;
+    limit?: number;
+    before?: string | null;
+  }): Promise<JobsTreePage> => {
+    const search = new URLSearchParams();
+    if (params.status) search.set("status", params.status);
+    if (params.kind) search.set("kind", params.kind);
+    if (params.q) search.set("q", params.q);
+    search.set("limit", String(params.limit ?? 20));
+    if (params.before) search.set("before", params.before);
+    return request<JobsTreePage>(`/api/jobs/tree?${search.toString()}`);
   },
 
   getJob: (id: string): Promise<Job> => request<Job>(`/api/jobs/${id}`),

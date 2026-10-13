@@ -186,6 +186,13 @@ export interface GpuProcess {
   vram_mb: number;
 }
 
+/** Страница дерева задач (/api/jobs/tree): корни с детьми + курсор дальше. */
+export interface JobsTreePage {
+  jobs: Job[];
+  has_more: boolean;
+  next_before: string | null;
+}
+
 export interface ModelMemory {
   engine: string;
   model: string;

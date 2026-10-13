@@ -416,10 +416,29 @@ class TranscriptionService:
         return self.repo.get(job_id)
 
     def list_jobs(
-        self, *, status: JobStatus | None = None, limit: int = 100, offset: int = 0
+        self,
+        *,
+        status: JobStatus | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        slim: bool = False,
     ) -> list[Job]:
-        """List jobs, newest first."""
-        return self.repo.list_jobs(status=status, limit=limit, offset=offset)
+        """List jobs, newest first; ``slim`` — списочный вид без транскрипта."""
+        return self.repo.list_jobs(status=status, limit=limit, offset=offset, slim=slim)
+
+    def jobs_tree_page(
+        self,
+        *,
+        status: JobStatus | None = None,
+        kind: str | None = None,
+        query: str | None = None,
+        limit: int = 20,
+        before: tuple[float, str] | None = None,
+    ) -> tuple[list[Job], bool]:
+        """One page of top-level jobs with all descendants (jobs-page scroll)."""
+        return self.repo.jobs_tree_page(
+            status=status, kind=kind, query=query, limit=limit, before=before
+        )
 
     def delete(self, job_id: str) -> None:
         """Delete a job from the repository."""
