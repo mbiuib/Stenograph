@@ -55,7 +55,7 @@ IDLE_SLEEP_SEC = 0.15  # decode loop idle poll (same cadence as the old per-sess
 
 
 _ENGINE_FACTORIES: dict[
-    tuple[str, str, str, str], tuple[TranscriberFactory, BatchTranscriberFactory]
+    tuple[str, ...], tuple[TranscriberFactory, BatchTranscriberFactory]
 ] = {}
 _ENGINE_FACTORIES_LOCK = threading.Lock()
 
@@ -80,7 +80,21 @@ def _engine_bundle(settings: Settings) -> tuple[TranscriberFactory, BatchTranscr
     if settings.asr_backend == "remote":
         return _remote_engine_bundle(settings)
     if (settings.live_engine or "").strip().lower() == "gigaam":
-        return _gigaam_engine_bundle(settings)
+        # Кэшируем так же, как whisper-бандл: Live-сессии и мост Jitsi должны
+        # делить ОДНУ модель, а не грузить по копии на каждый вызов фабрик.
+        key: tuple[str, ...] = (
+            "gigaam",
+            settings.gigaam_model,
+            settings.gigaam_revision,
+            str(settings.models_dir or ""),
+            settings.device,
+        )
+        with _ENGINE_FACTORIES_LOCK:
+            bundle = _ENGINE_FACTORIES.get(key)
+            if bundle is None:
+                bundle = _gigaam_engine_bundle(settings)
+                _ENGINE_FACTORIES[key] = bundle
+            return bundle
     key = (
         settings.live_model,
         str(settings.models_dir or ""),
@@ -100,8 +114,10 @@ def _remote_engine_bundle(
 ) -> tuple[TranscriberFactory, BatchTranscriberFactory]:
     """Window factories backed by the external ASR service (no local model).
 
-    The realtime path always speaks whisper on the service side; the model
-    lives there, this process only marshals audio windows over HTTP.
+    The realtime path speaks whisper or gigaam on the service side — the
+    choice is `live_engine` (the service answers to both whisper-live and
+    gigaam-live); the model lives there, this process only marshals audio
+    windows over HTTP.
     """
     from ..asr_client import GIGAAM_LIVE_MODEL, REALTIME_MODEL
     from ..engines.remote import remote_client_for

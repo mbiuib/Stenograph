@@ -192,6 +192,7 @@ def test_registry_and_service_aliases(tmp_path) -> None:
 
 def test_live_bundle_uses_gigaam_windows(tmp_path, monkeypatch) -> None:
     """Настройка live_engine=gigaam даёт окна через GigaAM (локальный режим)."""
+    live_manager._ENGINE_FACTORIES.clear()
     fake = _FakeModel()
     monkeypatch.setattr(GigaAmEngine, "_load", lambda self: fake)
     settings = Settings(data_dir=tmp_path)
@@ -205,6 +206,10 @@ def test_live_bundle_uses_gigaam_windows(tmp_path, monkeypatch) -> None:
     batched = batch_factory("ru")([np.zeros(RATE, np.float32)])
     assert batched[0][0][2] == "привет"
     assert fake.model.batch_rows == [1, 1]
+    # Live-сессии и мост Jitsi делят одну модель: повторный запрос — тот же бандл.
+    again_factory, _ = live_manager._engine_bundle(settings)
+    assert again_factory is factory
+    assert live_manager._engine_bundle(settings)[1] is batch_factory
 
 
 def test_remote_bundle_picks_the_gigaam_alias(tmp_path, monkeypatch) -> None:
