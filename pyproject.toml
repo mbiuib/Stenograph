@@ -39,6 +39,19 @@ moss = [
     # Cross-chunk speaker stitching: ECAPA-TDNN speaker embeddings (CPU).
     "speechbrain>=1.1",
 ]
+gigaam = [
+    # GigaAM Multilingual runs as HF remote code (modeling_gigaam.py):
+    # hydra instantiates the config tree, omegaconf carries it, sentencepiece
+    # and soundfile are imports of the modeling file itself. pyannote.core
+    # installs the `pyannote` namespace that transformers' static import check
+    # demands (the file's function-level imports); the gated pyannote.audio
+    # longform path stays unused — long files are chunked by the engine.
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "sentencepiece>=0.2",
+    "soundfile>=0.12",
+    "pyannote.core>=5.0",
+]
 
 [project.scripts]
 stenograph = "stenograph.cli:main"
@@ -85,6 +98,10 @@ module = [
     "moss_transcribe_diarize.*",
     "pyaudiowpatch.*",
     "soxr.*",
+    "hydra.*",
+    "omegaconf.*",
+    "sentencepiece.*",
+    "soundfile.*",
 ]
 ignore_missing_imports = true
 

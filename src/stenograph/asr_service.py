@@ -142,11 +142,12 @@ def _text_of(result: AsrResult) -> str:
 
 
 LIVE_ENGINE_NAME = "whisper-live"
+GIGAAM_LIVE_ENGINE_NAME = "gigaam-live"
 
 
 def advertised_engines() -> list[str]:
-    """Engine names this service answers to (registry + the live alias)."""
-    return sorted([*available_asr(), LIVE_ENGINE_NAME])
+    """Engine names this service answers to (registry + the realtime aliases)."""
+    return sorted([*available_asr(), LIVE_ENGINE_NAME, GIGAAM_LIVE_ENGINE_NAME])
 
 
 def build_default_engine(name: str, settings: Settings) -> AsrEngine:
@@ -164,6 +165,16 @@ def build_default_engine(name: str, settings: Settings) -> AsrEngine:
             models_dir=settings.models_dir,
             device=settings.device,
             compute_type=settings.compute_type,
+        )
+    if name == GIGAAM_LIVE_ENGINE_NAME:
+        from .engines.gigaam import GigaAmEngine
+
+        return GigaAmEngine(
+            model=settings.gigaam_model,
+            revision=settings.gigaam_revision,
+            models_dir=settings.models_dir,
+            device=settings.device,
+            chunk_sec=settings.gigaam_chunk_sec,
         )
     return get_asr(name, settings)
 

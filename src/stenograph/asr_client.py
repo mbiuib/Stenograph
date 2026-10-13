@@ -26,6 +26,7 @@ from .live.streamer import WindowWord
 
 SAMPLE_RATE = 16000  # the wire format: 16 kHz mono
 REALTIME_MODEL = "whisper-live"  # the service's turbo alias for realtime windows
+GIGAAM_LIVE_MODEL = "gigaam-live"  # the service's GigaAM alias for realtime windows
 
 
 class AsrServiceError(RuntimeError):

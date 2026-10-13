@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     # MEETSCRIBE_ASR_PORT: port of the external ASR service (asr_service.py,
-    # start_asr.bat) that serves whisper/moss in a separate process.
+    # External ASR service (asr_service.py / start_asr.bat): whisper, moss and
+    # gigaam in a separate process behind an OpenAI-compatible API, so heavy
+    # inference cannot freeze the main server's event loop.
     asr_port: int = 9001
     # MEETSCRIBE_ASR_BACKEND: where ASR runs — "local" (in-process, default)
     # or "remote" (the external service over HTTP; no models in this process).
@@ -45,6 +47,12 @@ class Settings(BaseSettings):
     device: str = "cuda"
     compute_type: str = "float16"
     whisper_model: str = "large-v3"
+    # GigaAM (ai-sage/GigaAM-Multilingual): Conformer + CTC, 70+ языков.
+    # Подключается движком "gigaam"; ревизии: ctc (220M) или large_ctc (600M).
+    # Модель можно положить в models_dir/GigaAM-Multilingual — тогда сети не надо.
+    gigaam_model: str = "ai-sage/GigaAM-Multilingual"
+    gigaam_revision: str = "ctc"
+    gigaam_chunk_sec: float = 22.0  # <= 24.5: модель принимает не больше 25 с за проход
     language: str = "auto"
 
     engine: str = "whisper"  # default ASR engine name (see the engines registry)
@@ -58,6 +66,10 @@ class Settings(BaseSettings):
 
     # Live mode: WASAPI/browser capture + local-agreement streaming on whisper.
     live_model: str = "large-v3-turbo"
+    # MEETSCRIBE_LIVE_ENGINE: окна живой расшифровки — "whisper" (turbo) или
+    # "gigaam" (мультиязычный CTC; в remote-режиме сервис отвечает алиасом
+    # "gigaam-live"). Применяется после перезапуска сервера.
+    live_engine: str = "whisper"
     live_chunk_sec: float = 0.2
     live_step_sec: float = 0.8
     live_max_window_sec: float = 25.0

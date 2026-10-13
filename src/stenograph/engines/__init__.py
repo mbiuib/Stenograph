@@ -51,6 +51,7 @@ def make_asr(name: str, settings: Settings) -> AsrEngine:
 
 
 def _register_builtin() -> None:
+    from .gigaam import GigaAmEngine
     from .moss import MossEngine
     from .whisper import FasterWhisperEngine
 
@@ -61,6 +62,16 @@ def _register_builtin() -> None:
             models_dir=s.models_dir,
             device=s.device,
             compute_type=s.compute_type,
+        ),
+    )
+    register_asr(
+        "gigaam",
+        lambda s: GigaAmEngine(
+            model=s.gigaam_model,
+            revision=s.gigaam_revision,
+            models_dir=s.models_dir,
+            device=s.device,
+            chunk_sec=s.gigaam_chunk_sec,
         ),
     )
     register_asr(

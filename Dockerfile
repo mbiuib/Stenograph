@@ -25,9 +25,9 @@ ENV PYTHONUNBUFFERED=1 UV_SYSTEM_PYTHON=1 UV_LINK_MODE=copy
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-# STENOGRAPH_EXTRAS=moss (default) installs the full engine set (torch/ml CUDA
-# + MOSS + ECAPA); pass an empty value for a whisper-only build.
-ARG STENOGRAPH_EXTRAS=moss
+# STENOGRAPH_EXTRAS=moss,gigaam (default) installs the full engine set (torch/ml
+# CUDA + MOSS + ECAPA + GigaAM multilingual deps); pass a subset for a lean build.
+ARG STENOGRAPH_EXTRAS=moss,gigaam
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e ".[${STENOGRAPH_EXTRAS}]"
 

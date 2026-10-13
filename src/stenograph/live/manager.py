@@ -79,6 +79,8 @@ def _engine_bundle(settings: Settings) -> tuple[TranscriberFactory, BatchTranscr
     """Return (window, batch) factories bound to one lazily loaded engine."""
     if settings.asr_backend == "remote":
         return _remote_engine_bundle(settings)
+    if (settings.live_engine or "").strip().lower() == "gigaam":
+        return _gigaam_engine_bundle(settings)
     key = (
         settings.live_model,
         str(settings.models_dir or ""),
@@ -101,8 +103,16 @@ def _remote_engine_bundle(
     The realtime path always speaks whisper on the service side; the model
     lives there, this process only marshals audio windows over HTTP.
     """
-    from ..asr_client import REALTIME_MODEL
+    from ..asr_client import GIGAAM_LIVE_MODEL, REALTIME_MODEL
     from ..engines.remote import remote_client_for
+
+    # Окна субтитров: движок выбирается настройкой live_engine; сервис
+    # отвечает на оба имени — "whisper-live" и "gigaam-live".
+    model_name = (
+        GIGAAM_LIVE_MODEL
+        if (settings.live_engine or "").strip().lower() == "gigaam"
+        else REALTIME_MODEL
+    )
 
     # Клиента резолвим на КАЖДЫЙ вызов: смена адреса в «Настройках»
     # подхватывается со следующего окна, без перезапуска сервера. Сами
@@ -111,7 +121,7 @@ def _remote_engine_bundle(
     def factory(language: str | None) -> WindowTranscriber:
         def transcribe(audio: np.ndarray) -> list[WindowWord]:
             results = remote_client_for(settings).transcribe_windows(
-                [audio], model=REALTIME_MODEL, language=language
+                [audio], model=model_name, language=language
             )
             return results[0] if results else []
 
@@ -120,7 +130,7 @@ def _remote_engine_bundle(
     def batch_factory(language: str | None) -> BatchWindowTranscriber:
         def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
             return remote_client_for(settings).transcribe_windows(
-                windows, model=REALTIME_MODEL, language=language
+                windows, model=model_name, language=language
             )
 
         return transcribe
@@ -153,6 +163,49 @@ def _build_engine_bundle(
         def transcribe(audio: np.ndarray) -> list[WindowWord]:
             with engine_lock:
                 return get_engine().transcribe_window(audio, language=language, beam_size=1)
+
+        return transcribe
+
+    def batch_factory(language: str | None) -> BatchWindowTranscriber:
+        def transcribe(windows: list[np.ndarray]) -> list[list[WindowWord]]:
+            with engine_lock:
+                return get_engine().transcribe_batch(windows, language=language)
+
+        return transcribe
+
+    return factory, batch_factory
+
+
+def _gigaam_engine_bundle(
+    settings: Settings,
+) -> tuple[TranscriberFactory, BatchTranscriberFactory]:
+    """Window factories backed by the GigaAM engine (local mode).
+
+    GigaAM декодирует окна CTC-головами напрямую — без файлов и без ffmpeg;
+    одна модель держится в замыкании, лок сериализует работу на GPU.
+    """
+    from ..engines.gigaam import GigaAmEngine
+
+    holder: dict[str, Any] = {}
+    engine_lock = threading.Lock()
+
+    def get_engine() -> Any:
+        engine = holder.get("engine")
+        if engine is None:
+            engine = GigaAmEngine(
+                model=settings.gigaam_model,
+                revision=settings.gigaam_revision,
+                models_dir=settings.models_dir,
+                device=settings.device,
+                chunk_sec=settings.gigaam_chunk_sec,
+            )
+            holder["engine"] = engine
+        return engine
+
+    def factory(language: str | None) -> WindowTranscriber:
+        def transcribe(audio: np.ndarray) -> list[WindowWord]:
+            with engine_lock:
+                return get_engine().transcribe_window(audio, language=language)
 
         return transcribe
 
