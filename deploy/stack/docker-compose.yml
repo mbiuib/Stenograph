@@ -431,7 +431,7 @@ services:
             - TRACING_ENDPOINT
             - TRACING_PROTOCOL
             - JICOFO_AUTH_LIFETIME
-            - JICOFO_AUTH_PASSWORD
+            - "JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD:?нужен --env-file ../jitsi-windows/.env}"
             - JICOFO_AUTH_TYPE
             - JICOFO_BRIDGE_REGION_GROUPS
             - JICOFO_ENABLE_AUTH
@@ -534,7 +534,7 @@ services:
             - JVB_ADVERTISE_IPS
             - JVB_ADVERTISE_PRIVATE_CANDIDATES
             - JVB_AUTH_USER
-            - JVB_AUTH_PASSWORD
+            - "JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD:?нужен --env-file ../jitsi-windows/.env}"
             - JVB_BREWERY_MUC
             - JVB_CC_TRUST_BWE
             - JVB_DISABLE_STUN
@@ -612,7 +612,7 @@ services:
             - JIGASI_LOG_FILE
             - JIGASI_MODE=transcriber
             - JIGASI_XMPP_USER
-            - JIGASI_XMPP_PASSWORD
+            - "JIGASI_XMPP_PASSWORD=${JIGASI_XMPP_PASSWORD:?нужен --env-file ../jitsi-windows/.env}"
             - JIGASI_BREWERY_MUC
             - JIGASI_STATS_ID
             - JIGASI_TRANSCRIBER_ADVERTISE_URL
@@ -624,7 +624,7 @@ services:
             - JIGASI_TRANSCRIBER_FILTER_SILENCE
             - JIGASI_TRANSCRIBER_OCI_COMPARTMENT
             - JIGASI_TRANSCRIBER_OCI_REGION
-            - JIGASI_TRANSCRIBER_PASSWORD
+            - "JIGASI_TRANSCRIBER_PASSWORD=${JIGASI_TRANSCRIBER_PASSWORD:?нужен --env-file ../jitsi-windows/.env}"
             - JIGASI_TRANSCRIBER_RECORD_AUDIO
             - JIGASI_TRANSCRIBER_REMOTE_CONFIG_URL
             - JIGASI_TRANSCRIBER_REMOTE_CONFIG_URL_KEY_PATH
